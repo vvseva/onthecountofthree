@@ -116,8 +116,8 @@ async function bootstrapApp() {
       roomBar.updateCredentials(credentials.roomId, credentials.keyBase64);
       syncEngine.setIsHost(true);
       syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
-      badgesBar.updateRole('PRIMARY');
-      announcer.announce('Created new encrypted room.');
+      badgesBar.updateRole(syncEngine.getRole());
+      announcer.announce('Created new encrypted room. You are Follower; second user that joins will be Master Clock.');
       diagnostics.appendLog(`[Room] Generated fresh Room ID ${credentials.roomId}`);
     },
     onOpenInfoModal: () => {
@@ -167,12 +167,15 @@ async function bootstrapApp() {
 
       // Toast when peer connects/disconnects (no chat crowding)
       if (peer && !previousPeer) {
+        const roleMsg = syncEngine.getRole() === 'PRIMARY'
+          ? 'You are Master Clock (zero rate changes). Peer is Follower.'
+          : 'Second user joined as Master Clock. You are Follower.';
         toastManager.show({
           title: 'Peer Connected',
-          message: `User <strong>${peer.peerId}</strong> joined the room.<br><small>End-to-end encrypted session established.</small>`,
+          message: `User <strong>${peer.peerId}</strong> joined the room.<br><small>${roleMsg}</small>`,
           icon: '👋',
           type: 'info',
-          durationMs: 4000
+          durationMs: 4500
         });
       } else if (!peer && previousPeer) {
         toastManager.show({

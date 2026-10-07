@@ -246,12 +246,18 @@ export class SyncEngine {
       this.callbacks.onLog(`[Sync] Peer connected: ${payload.senderId}`);
       this.callbacks.onAnnounceMessage(`Peer connected: ${payload.senderId}`);
 
-      // Automatic tie-breaking for default roles:
-      // If both start as PRIMARY, guest/secondary yields based on senderId comparison
-      if (this.role === 'PRIMARY' && payload.role === 'PRIMARY' && !this.isHost) {
-        if (this.senderId > payload.senderId) {
+      // Role Assignment: The second user that joins is Clock (PRIMARY), and the first user (host) becomes Follower (SECONDARY)
+      if (this.isHost) {
+        if (this.role !== 'SECONDARY') {
           this.setRole('SECONDARY', false);
-          this.callbacks.onLog(`[Sync] Automatic tie-break: Local role elected as SECONDARY (follower).`);
+          this.callbacks.onLog('[Sync] Second user joined room: Local (User 1) is SECONDARY (follower), Peer (User 2) is PRIMARY (clock).');
+          this.callbacks.onRoleChange?.('SECONDARY', true);
+        }
+      } else {
+        if (this.role !== 'PRIMARY') {
+          this.setRole('PRIMARY', false);
+          this.callbacks.onLog('[Sync] Joined room as second user: Local is PRIMARY (clock), Peer is SECONDARY (follower).');
+          this.callbacks.onRoleChange?.('PRIMARY', true);
         }
       }
     } else {
@@ -455,9 +461,8 @@ export class SyncEngine {
 
   public setIsHost(isHost: boolean): void {
     this.isHost = isHost;
-    if (isHost) {
-      this.role = 'PRIMARY';
-    }
+    // The second user that joins is Clock (PRIMARY), and the first user (host) becomes Follower (SECONDARY)
+    this.role = isHost ? 'SECONDARY' : 'PRIMARY';
   }
 
   public setRole(role: SyncRole, broadcast = true): void {

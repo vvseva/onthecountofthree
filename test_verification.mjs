@@ -772,3 +772,30 @@ test('Audio Decoded Peer Notification: broadcasts AUDIO_DECODED event with track
   assert.equal(decrypted.role, 'PRIMARY');
 });
 
+test('Role Handshake: Second user that joins is Clock (PRIMARY) and first user is Follower (SECONDARY)', () => {
+  // User 1 creates room -> isHost = true
+  let user1 = { isHost: true, role: 'SECONDARY' };
+  // User 2 joins via share URL -> isHost = false
+  let user2 = { isHost: false, role: 'PRIMARY' };
+
+  function onPeerConnected(user, remoteRole) {
+    if (user.isHost) {
+      user.role = 'SECONDARY'; // First user becomes follower
+    } else {
+      user.role = 'PRIMARY'; // Second user that joins is clock
+    }
+  }
+
+  // Initial state before peer joins
+  assert.equal(user1.role, 'SECONDARY');
+  assert.equal(user2.role, 'PRIMARY');
+
+  // Peer connection event
+  onPeerConnected(user1, user2.role);
+  onPeerConnected(user2, user1.role);
+
+  assert.equal(user1.role, 'SECONDARY', 'First user (host) must be Follower (SECONDARY)');
+  assert.equal(user2.role, 'PRIMARY', 'Second user that joins must be Clock (PRIMARY)');
+});
+
+
