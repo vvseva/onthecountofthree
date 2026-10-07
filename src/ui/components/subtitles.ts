@@ -597,13 +597,10 @@ export class SubtitleAndAudioManager {
     this.currentTrackEl = track;
 
     setTimeout(() => {
+      // Set all textTracks to 'hidden' so the browser's native text renderer does NOT
+      // paint duplicate subtitles on top of our custom, high-contrast DOM overlay
       for (let i = 0; i < this.video.textTracks.length; i++) {
-        const t = this.video.textTracks[i];
-        if (t.label.startsWith(trackLabel)) {
-          t.mode = 'showing';
-        } else {
-          t.mode = 'hidden';
-        }
+        this.video.textTracks[i].mode = 'hidden';
       }
     }, 100);
   }

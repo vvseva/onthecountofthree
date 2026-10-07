@@ -44,6 +44,15 @@ export class VideoPlayerComponent {
   private pauseBannerTextEl: HTMLElement;
   private subtitlesOverlay: HTMLElement;
 
+  // Decoding Alert Popup State
+  private isDecodingAudio = false;
+  private decodingAudioProgress = 0;
+  private decodingTrackName = '';
+  private decodingAlertOverlay: HTMLElement;
+  private decodingAlertProgress: HTMLElement;
+  private decodingProgressFill: HTMLElement;
+  private decodingAlertTrackName: HTMLElement;
+
   // Subtitles & Audio
   private subtitleManager: SubtitleAndAudioManager;
   private subFileInput: HTMLInputElement;
@@ -98,6 +107,43 @@ export class VideoPlayerComponent {
 
           <!-- On-Screen Live Subtitles Overlay -->
           <div class="subtitles-overlay" id="subtitles-overlay" style="display: none;" aria-live="polite"></div>
+
+          <!-- Audio Decoding Alert Modal Popup -->
+          <div class="decoding-alert-overlay" id="decoding-alert-overlay" style="display: none;" role="alertdialog" aria-labelledby="decoding-alert-heading">
+            <div class="window-frame decoding-alert-card">
+              <div class="window-titlebar decoding-titlebar">
+                <div class="window-title-left">
+                  <span>⏳</span>
+                  <span style="font-size: 11px; font-weight: bold;">Audio Decoding In Progress</span>
+                </div>
+                <div class="window-controls-glyph">
+                  <button class="window-btn" id="btn-close-decoding-alert" title="Close">×</button>
+                </div>
+              </div>
+              <div class="decoding-alert-body">
+                <div class="decoding-alert-icon">📼</div>
+                <div class="decoding-alert-content">
+                  <div class="decoding-alert-heading" id="decoding-alert-heading">Please wait for audio to decode!</div>
+                  <div class="decoding-alert-desc">
+                    Dolby audio track (<strong id="decoding-alert-track-name">Audio Track</strong>) is currently being decoded by the WASM engine.
+                  </div>
+                  <div class="decoding-progress-container">
+                    <div class="decoding-progress-bar">
+                      <div class="decoding-progress-fill" id="decoding-progress-fill" style="width: 0%;"></div>
+                    </div>
+                    <span class="decoding-progress-text" id="decoding-alert-progress">0%</span>
+                  </div>
+                  <div class="decoding-alert-hint">
+                    Playback will have no sound if started before decoding finishes. Please wait a moment.
+                  </div>
+                </div>
+              </div>
+              <div class="decoding-alert-actions">
+                <button class="retro-btn primary" id="btn-decoding-alert-ok">⏳ Wait for Audio</button>
+                <button class="retro-btn" id="btn-decoding-play-anyway">▶ Play Without Sound</button>
+              </div>
+            </div>
+          </div>
 
           <!-- Dropzone Overlay -->
           <div class="dropzone-overlay" id="dropzone-overlay">
@@ -224,6 +270,24 @@ export class VideoPlayerComponent {
     this.pauseBannerTextEl = this.element.querySelector('#pause-banner-text')!;
     this.subtitlesOverlay = this.element.querySelector('#subtitles-overlay')!;
 
+    // Decoding Alert Popup
+    this.decodingAlertOverlay = this.element.querySelector('#decoding-alert-overlay')!;
+    this.decodingAlertProgress = this.element.querySelector('#decoding-alert-progress')!;
+    this.decodingProgressFill = this.element.querySelector('#decoding-progress-fill')!;
+    this.decodingAlertTrackName = this.element.querySelector('#decoding-alert-track-name')!;
+
+    this.element.querySelector('#btn-close-decoding-alert')!.addEventListener('click', () => {
+      this.hideDecodingAlertPopup();
+    });
+    this.element.querySelector('#btn-decoding-alert-ok')!.addEventListener('click', () => {
+      this.hideDecodingAlertPopup();
+    });
+    this.element.querySelector('#btn-decoding-play-anyway')!.addEventListener('click', () => {
+      this.isDecodingAudio = false;
+      this.hideDecodingAlertPopup();
+      this.callbacks.onUserPlayRequest(this.isInstantPlayEnabled());
+    });
+
     // Subtitles & Audio
     this.subtitleManager = new SubtitleAndAudioManager(this.video);
     this.subSelectEl = this.element.querySelector('#sub-select')!;
@@ -343,20 +407,33 @@ export class VideoPlayerComponent {
         const demux = this.subtitleManager.getDemuxResult();
         const trk = demux?.audioTracks.find((t) => t.trackNumber === trkNum);
 
+        this.isDecodingAudio = true;
+        this.decodingAudioProgress = 0;
+        this.decodingTrackName = trk?.name || `Track #${trkNum}`;
+
         // Always decode and synchronize chosen MKV audio track
-        this.callbacks.onLog(`[Audio] Decoding track #${trkNum} (${trk?.name || trk?.codec || ''})...`);
+        this.callbacks.onLog(`[Audio] Decoding track #${trkNum} (${this.decodingTrackName})...`);
         this.eac3StatusPill.style.display = 'inline-block';
         this.eac3StatusPill.textContent = '⏳ Decoding Audio (0%)...';
         try {
           await this.subtitleManager.decodeAndPlayEac3Audio(trkNum, (pct) => {
+            this.decodingAudioProgress = pct;
             this.eac3StatusPill.textContent = `⏳ Decoding Audio (${pct}%)...`;
+            if (this.decodingAlertOverlay.style.display !== 'none') {
+              this.decodingAlertProgress.textContent = `${pct}%`;
+              this.decodingProgressFill.style.width = `${pct}%`;
+            }
           });
+          this.isDecodingAudio = false;
+          this.hideDecodingAlertPopup();
           const langCode = trk && trk.language !== 'und' ? trk.language.toUpperCase() : 'Audio';
           this.eac3StatusPill.textContent = `✔ ${langCode} Active`;
           this.eac3StatusPill.style.color = '#008000';
           this.callbacks.onLog(`[Audio] Track #${trkNum} decoded and active!`);
           this.callbacks.onAnnounce(`Track ${trkNum} active: ${trk?.name || 'Selected Audio'}`);
         } catch (err) {
+          this.isDecodingAudio = false;
+          this.hideDecodingAlertPopup();
           this.eac3StatusPill.textContent = '⚠ Audio Decode Error';
           this.eac3StatusPill.style.color = '#cc0000';
           this.callbacks.onLog(`[Audio Error] Could not decode track: ${err}`, 'error');
@@ -774,6 +851,9 @@ export class VideoPlayerComponent {
       || demux.audioTracks.find((t) => t.isUnsupportedBrowserCodec);
 
     if (eac3Track) {
+      this.isDecodingAudio = true;
+      this.decodingAudioProgress = 0;
+      this.decodingTrackName = eac3Track.name || `${eac3Track.codec} Track #${eac3Track.trackNumber}`;
       this.eac3StatusPill.style.display = 'inline-block';
       this.eac3StatusPill.textContent = '⏳ Decoding Dolby Audio (0%)...';
       this.callbacks.onLog(`[Audio] WEB-DL ${eac3Track.codec} audio detected (${eac3Track.name}). Starting WASM libavcodec decode...`);
@@ -785,19 +865,29 @@ export class VideoPlayerComponent {
 
       try {
         await this.subtitleManager.decodeAndPlayEac3Audio(eac3Track.trackNumber, (pct) => {
+          this.decodingAudioProgress = pct;
           this.eac3StatusPill.textContent = `⏳ Decoding Dolby Audio (${pct}%)...`;
+          if (this.decodingAlertOverlay.style.display !== 'none') {
+            this.decodingAlertProgress.textContent = `${pct}%`;
+            this.decodingProgressFill.style.width = `${pct}%`;
+          }
         });
+        this.isDecodingAudio = false;
+        this.hideDecodingAlertPopup();
         const langCode = eac3Track.language !== 'und' ? eac3Track.language.toUpperCase() : 'Audio';
         this.eac3StatusPill.textContent = `✔ ${langCode} 5.1 Ready`;
         this.eac3StatusPill.style.color = '#008000';
         this.callbacks.onLog(`[Audio] Dolby Digital audio (${eac3Track.name}) decoded and active!`);
         this.callbacks.onAnnounce(`Dolby Digital audio ready: ${eac3Track.name}`);
       } catch (err) {
+        this.isDecodingAudio = false;
+        this.hideDecodingAlertPopup();
         this.eac3StatusPill.textContent = '⚠ Audio Decode Error';
         this.eac3StatusPill.style.color = '#cc0000';
         this.callbacks.onLog(`[Audio Error] Could not decode Dolby track: ${err}`, 'error');
       }
     } else {
+      this.isDecodingAudio = false;
       this.eac3StatusPill.style.display = 'none';
     }
 
@@ -836,6 +926,10 @@ export class VideoPlayerComponent {
     }
 
     if (this.video.paused) {
+      if (this.isDecodingAudio) {
+        this.showDecodingAlertPopup();
+        return;
+      }
       this.callbacks.onUserPlayRequest(this.isInstantPlayEnabled());
     } else {
       this.callbacks.onUserPauseRequest();
@@ -844,6 +938,10 @@ export class VideoPlayerComponent {
 
   public startSynchronizedCountdown(targetStartTime: number, onComplete: () => void): void {
     this.subtitleManager.resumeAudioContext();
+    if (this.isDecodingAudio) {
+      this.showDecodingAlertPopup();
+      return;
+    }
     this.cancelCountdown();
     this.countdownOverlay.style.display = 'flex';
 
@@ -918,6 +1016,20 @@ export class VideoPlayerComponent {
 
   public hidePauseBanner(): void {
     this.pauseBannerOverlay.style.display = 'none';
+  }
+
+  // ================= Audio Decoding Alert Popup =================
+
+  public showDecodingAlertPopup(): void {
+    this.decodingAlertTrackName.textContent = this.decodingTrackName || 'Dolby Audio';
+    this.decodingAlertProgress.textContent = `${this.decodingAudioProgress}%`;
+    this.decodingProgressFill.style.width = `${this.decodingAudioProgress}%`;
+    this.decodingAlertOverlay.style.display = 'flex';
+    this.callbacks.onAnnounce(`Audio decoding in progress, ${this.decodingAudioProgress} percent. Please wait.`);
+  }
+
+  public hideDecodingAlertPopup(): void {
+    this.decodingAlertOverlay.style.display = 'none';
   }
 
   // ================= Media Controls Helper Methods =================
