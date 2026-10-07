@@ -15,6 +15,8 @@ export interface DemuxedTrackInfo {
   codec: string;
   channels?: number;
   samplingRate?: number;
+  isDefault?: boolean;
+  isForced?: boolean;
   isUnsupportedBrowserCodec?: boolean;
 }
 
@@ -36,7 +38,8 @@ interface SubtitleCue {
 }
 
 /**
- * Reads variable-length integer (VINT) used by Matroska / EBML.
+ * Reads variable-length integer (VINT) used by Matroska / EBML for data lengths.
+ * The length marker bit is masked out to return the integer value.
  */
 export function readEbmlVint(buffer: Uint8Array, offset: number): { value: number; length: number } | null {
   if (offset >= buffer.length) return null;
@@ -61,10 +64,61 @@ export function readEbmlVint(buffer: Uint8Array, offset: number): { value: numbe
 }
 
 /**
+ * Reads an EBML Element ID (1 to 4 bytes).
+ * For Element IDs, the length marker bit IS preserved as part of the ID number.
+ */
+export function readEbmlId(buffer: Uint8Array, offset: number): { id: number; length: number } | null {
+  if (offset >= buffer.length) return null;
+  const firstByte = buffer[offset];
+  if (firstByte === 0) return null;
+
+  let length = 1;
+  let mask = 0x80;
+  while ((firstByte & mask) === 0 && length <= 4) {
+    length++;
+    mask >>= 1;
+  }
+
+  if (offset + length > buffer.length) return null;
+
+  let id = 0;
+  for (let i = 0; i < length; i++) {
+    id = (id * 256) + buffer[offset + i];
+  }
+
+  return { id, length };
+}
+
+/**
+ * Parses integer value from buffer bytes.
+ */
+function readUint(buffer: Uint8Array, offset: number, length: number): number {
+  let val = 0;
+  for (let i = 0; i < length; i++) {
+    val = (val * 256) + buffer[offset + i];
+  }
+  return val;
+}
+
+/**
+ * Parses float value (32-bit or 64-bit IEEE 754) from buffer bytes.
+ */
+function readFloat(buffer: Uint8Array, offset: number, length: number): number {
+  if (length === 4) {
+    const dv = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
+    return dv.getFloat32(0, false);
+  } else if (length === 8) {
+    const dv = new DataView(buffer.buffer, buffer.byteOffset + offset, 8);
+    return dv.getFloat64(0, false);
+  }
+  return 48000;
+}
+
+/**
  * Inspects Matroska SeekHead to locate the exact file offset of Tracks element.
  */
 async function locateMatroskaTracksOffset(file: File): Promise<{ tracksOffset: number; segmentOffset: number; timecodeScale: number }> {
-  const headSlice = file.slice(0, Math.min(file.size, 512 * 1024));
+  const headSlice = file.slice(0, Math.min(file.size, 1024 * 1024));
   const buf = new Uint8Array(await headSlice.arrayBuffer());
 
   let segmentOffset = 0;
@@ -72,43 +126,95 @@ async function locateMatroskaTracksOffset(file: File): Promise<{ tracksOffset: n
   let timecodeScale = 1000000; // default 1ms
 
   // Search for Segment element: 0x18, 0x53, 0x80, 0x67
-  for (let i = 0; i < buf.length - 8; i++) {
-    if (buf[i] === 0x18 && buf[i + 1] === 0x53 && buf[i + 2] === 0x80 && buf[i + 3] === 0x67) {
-      const sizeVint = readEbmlVint(buf, i + 4);
-      if (sizeVint) {
-        segmentOffset = i + 4 + sizeVint.length;
+  let pos = 0;
+  while (pos < buf.length - 8) {
+    const idInfo = readEbmlId(buf, pos);
+    if (!idInfo) { pos++; continue; }
+
+    if (idInfo.id === 0x18538067) { // Segment
+      const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+      if (sizeInfo) {
+        segmentOffset = pos + idInfo.length + sizeInfo.length;
+        pos = segmentOffset;
+      } else {
+        pos += idInfo.length;
       }
       break;
     }
+    pos++;
   }
 
-  // Search SeekHead or Tracks directly: 0x16, 0x54, 0xAE, 0x6B
-  for (let i = segmentOffset; i < buf.length - 12; i++) {
-    // Check for Tracks ID 0x1654AE6B
-    if (buf[i] === 0x16 && buf[i + 1] === 0x54 && buf[i + 2] === 0xAE && buf[i + 3] === 0x6B) {
-      tracksOffset = i;
+  // Inside Segment: parse children (SeekHead, Info, Tracks)
+  while (pos < buf.length - 8) {
+    const idInfo = readEbmlId(buf, pos);
+    if (!idInfo) break;
+    const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+    if (!sizeInfo) break;
+
+    const dataStart = pos + idInfo.length + sizeInfo.length;
+    const dataEnd = dataStart + sizeInfo.value;
+
+    if (idInfo.id === 0x1654AE6B) { // Tracks directly found!
+      tracksOffset = pos;
       break;
     }
-    // Check Seek entry for Tracks: 0x53 0xAB with value 0x1654AE6B
-    if (buf[i] === 0x53 && buf[i + 1] === 0xAB) {
-      const idLen = buf[i + 2];
-      if (idLen === 4 && buf[i + 3] === 0x16 && buf[i + 4] === 0x54 && buf[i + 5] === 0xAE && buf[i + 6] === 0x6B) {
-        // Look for SeekPosition 0x53 0xAC nearby
-        for (let j = i + 7; j < i + 35 && j < buf.length - 4; j++) {
-          if (buf[j] === 0x53 && buf[j + 1] === 0xAC) {
-            const posVint = readEbmlVint(buf, j + 2);
-            if (posVint) {
-              let pos = 0;
-              for (let k = 0; k < posVint.value; k++) {
-                pos = (pos * 256) + buf[j + 2 + posVint.length + k];
-              }
-              tracksOffset = segmentOffset + pos;
-              break;
-            }
-          }
+
+    if (idInfo.id === 0x1549A966) { // Info
+      // Check for TimecodeScale (0x2AD7B1)
+      let infoPos = dataStart;
+      while (infoPos < dataEnd && infoPos < buf.length - 4) {
+        const iId = readEbmlId(buf, infoPos);
+        if (!iId) break;
+        const iSize = readEbmlVint(buf, infoPos + iId.length);
+        if (!iSize) break;
+        if (iId.id === 0x2AD7B1) { // TimecodeScale
+          timecodeScale = readUint(buf, infoPos + iId.length + iSize.length, iSize.value);
         }
+        infoPos += iId.length + iSize.length + iSize.value;
       }
     }
+
+    if (idInfo.id === 0x114D9B74) { // SeekHead
+      let seekPos = dataStart;
+      while (seekPos < dataEnd && seekPos < buf.length - 6) {
+        const sId = readEbmlId(buf, seekPos);
+        if (!sId) break;
+        const sSize = readEbmlVint(buf, seekPos + sId.length);
+        if (!sSize) break;
+        const sDataStart = seekPos + sId.length + sSize.length;
+        const sDataEnd = sDataStart + sSize.value;
+
+        if (sId.id === 0x4DBB) { // Seek entry
+          let ePos = sDataStart;
+          let seekTargetId = 0;
+          let seekTargetPos = -1;
+
+          while (ePos < sDataEnd && ePos < buf.length - 4) {
+            const entryId = readEbmlId(buf, ePos);
+            if (!entryId) break;
+            const entrySize = readEbmlVint(buf, ePos + entryId.length);
+            if (!entrySize) break;
+            const entryDataStart = ePos + entryId.length + entrySize.length;
+
+            if (entryId.id === 0x53AB) { // SeekID
+              seekTargetId = readUint(buf, entryDataStart, entrySize.value);
+            } else if (entryId.id === 0x53AC) { // SeekPosition
+              seekTargetPos = readUint(buf, entryDataStart, entrySize.value);
+            }
+
+            ePos += entryId.length + entrySize.length + entrySize.value;
+          }
+
+          if (seekTargetId === 0x1654AE6B && seekTargetPos !== -1) {
+            tracksOffset = segmentOffset + seekTargetPos;
+          }
+        }
+
+        seekPos = sDataEnd;
+      }
+    }
+
+    pos = dataEnd;
   }
 
   return { tracksOffset, segmentOffset, timecodeScale };
@@ -158,7 +264,6 @@ async function inspectMp4File(file: File): Promise<DemuxResult> {
         let lang = 'und';
 
         for (let i = pos; i < trakEnd - 12; i++) {
-          // Check handler type: 'soun' or 'subt' / 'sbtl' / 'text'
           if (buf[i] === 0x73 && buf[i + 1] === 0x6F && buf[i + 2] === 0x75 && buf[i + 3] === 0x6E) {
             isAudio = true;
           }
@@ -182,7 +287,6 @@ async function inspectMp4File(file: File): Promise<DemuxResult> {
             codec = fourcc;
           }
 
-          // Language tag (mdhd)
           if (buf[i] === 0x6D && buf[i + 1] === 0x64 && buf[i + 2] === 0x68 && buf[i + 3] === 0x64 && i + 24 < trakEnd) {
             const langCode = (buf[i + 20] << 8) | buf[i + 21];
             const c1 = String.fromCharCode(((langCode >> 10) & 0x1F) + 0x60);
@@ -197,7 +301,7 @@ async function inspectMp4File(file: File): Promise<DemuxResult> {
           audioTracks.push({
             trackNumber: audioTracks.length + 1,
             type: 'audio',
-            name: `Track ${audioTracks.length + 1} (${lang !== 'und' ? lang.toUpperCase() : 'Audio'})`,
+            name: `${lang !== 'und' ? lang.toUpperCase() : 'Audio'} Track ${audioTracks.length + 1}`,
             language: lang,
             codec: codec === 'ec-3' ? 'E-AC-3' : (codec === 'ac-3' ? 'AC-3' : codec.toUpperCase()),
             channels,
@@ -207,7 +311,7 @@ async function inspectMp4File(file: File): Promise<DemuxResult> {
           subtitleTracks.push({
             trackNumber: subtitleTracks.length + 1,
             type: 'subtitle',
-            name: `Subtitle ${subtitleTracks.length + 1} (${lang !== 'und' ? lang.toUpperCase() : 'Sub'})`,
+            name: `${lang !== 'und' ? lang.toUpperCase() : 'Subtitle'} Track ${subtitleTracks.length + 1}`,
             language: lang,
             codec: codec.toUpperCase()
           });
@@ -241,7 +345,6 @@ async function inspectMp4File(file: File): Promise<DemuxResult> {
  * Parses all Audio and Subtitle tracks from a Matroska (MKV / WebM) or MP4 container.
  */
 export async function demuxMatroska(file: File): Promise<DemuxResult> {
-  // Check container signature
   const headSlice = file.slice(0, 16);
   const headBytes = new Uint8Array(await headSlice.arrayBuffer());
 
@@ -262,34 +365,41 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
   let tracksBuffer: Uint8Array;
 
   if (tracksOffset !== -1) {
-    const slice = file.slice(tracksOffset, Math.min(file.size, tracksOffset + 512 * 1024));
+    const slice = file.slice(tracksOffset, Math.min(file.size, tracksOffset + 1024 * 1024));
     tracksBuffer = new Uint8Array(await slice.arrayBuffer());
   } else {
-    const slice = file.slice(0, Math.min(file.size, 8 * 1024 * 1024));
+    const slice = file.slice(0, Math.min(file.size, 16 * 1024 * 1024));
     tracksBuffer = new Uint8Array(await slice.arrayBuffer());
   }
 
-  // Scan for Tracks element: 0x16 0x54 0xAE 0x6B
-  let pos = 0;
+  // Find Tracks element: 0x1654AE6B
+  let tracksDataStart = 0;
+  let tracksDataEnd = tracksBuffer.length;
+
   for (let i = 0; i < tracksBuffer.length - 8; i++) {
-    if (tracksBuffer[i] === 0x16 && tracksBuffer[i + 1] === 0x54 && tracksBuffer[i + 2] === 0xAE && tracksBuffer[i + 3] === 0x6B) {
-      const lenVint = readEbmlVint(tracksBuffer, i + 4);
-      if (lenVint) {
-        pos = i + 4 + lenVint.length;
+    const idInfo = readEbmlId(tracksBuffer, i);
+    if (idInfo && idInfo.id === 0x1654AE6B) {
+      const sizeInfo = readEbmlVint(tracksBuffer, i + idInfo.length);
+      if (sizeInfo) {
+        tracksDataStart = i + idInfo.length + sizeInfo.length;
+        tracksDataEnd = Math.min(tracksBuffer.length, tracksDataStart + sizeInfo.value);
+        break;
       }
-      break;
     }
   }
 
-  // Parse TrackEntry (0xAE) children
-  while (pos < tracksBuffer.length - 6) {
-    if (tracksBuffer[pos] === 0xAE) {
-      pos++;
-      const entryLen = readEbmlVint(tracksBuffer, pos);
-      if (!entryLen) break;
-      pos += entryLen.length;
-      const entryEnd = Math.min(tracksBuffer.length, pos + entryLen.value);
+  // Parse TrackEntry (0xAE) children inside Tracks element
+  let pos = tracksDataStart;
+  while (pos < tracksDataEnd - 4) {
+    const entryId = readEbmlId(tracksBuffer, pos);
+    if (!entryId) break;
+    const entrySize = readEbmlVint(tracksBuffer, pos + entryId.length);
+    if (!entrySize) break;
 
+    const entryDataStart = pos + entryId.length + entrySize.length;
+    const entryDataEnd = Math.min(tracksDataEnd, entryDataStart + entrySize.value);
+
+    if (entryId.id === 0xAE) { // TrackEntry
       let trackType = 0;
       let trackNum = audioTracks.length + subtitleTracks.length + 1;
       let codecId = '';
@@ -297,86 +407,56 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
       let language = 'und';
       let channels = 2;
       let samplingRate = 48000;
+      let isDefault = false;
+      let isForced = false;
 
-      while (pos < entryEnd - 2) {
-        const id = tracksBuffer[pos];
-        pos++;
+      let childPos = entryDataStart;
+      while (childPos < entryDataEnd - 2) {
+        const cId = readEbmlId(tracksBuffer, childPos);
+        if (!cId) break;
+        const cSize = readEbmlVint(tracksBuffer, childPos + cId.length);
+        if (!cSize) break;
 
-        if (id === 0xD7) { // TrackNumber
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            let val = 0;
-            for (let b = 0; b < len.value; b++) {
-              val = (val * 256) + tracksBuffer[pos + b];
+        const cDataStart = childPos + cId.length + cSize.length;
+        const cDataEnd = cDataStart + cSize.value;
+
+        if (cId.id === 0xD7) { // TrackNumber
+          trackNum = readUint(tracksBuffer, cDataStart, cSize.value);
+        } else if (cId.id === 0x83) { // TrackType (1=video, 2=audio, 17=subtitle)
+          trackType = readUint(tracksBuffer, cDataStart, cSize.value);
+        } else if (cId.id === 0x88) { // FlagDefault
+          isDefault = readUint(tracksBuffer, cDataStart, cSize.value) === 1;
+        } else if (cId.id === 0x55AA) { // FlagForced
+          isForced = readUint(tracksBuffer, cDataStart, cSize.value) === 1;
+        } else if (cId.id === 0x86) { // CodecID
+          codecId = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '');
+        } else if (cId.id === 0x536E) { // Name / Title
+          trackName = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
+        } else if (cId.id === 0x22B59C) { // Language
+          language = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
+        } else if (cId.id === 0xE1) { // Audio settings
+          let aPos = cDataStart;
+          while (aPos < cDataEnd - 2) {
+            const aId = readEbmlId(tracksBuffer, aPos);
+            if (!aId) break;
+            const aSize = readEbmlVint(tracksBuffer, aPos + aId.length);
+            if (!aSize) break;
+            const aDataStart = aPos + aId.length + aSize.length;
+
+            if (aId.id === 0x9F) { // Channels
+              channels = readUint(tracksBuffer, aDataStart, aSize.value);
+            } else if (aId.id === 0xB5) { // SamplingFrequency
+              samplingRate = readFloat(tracksBuffer, aDataStart, aSize.value);
             }
-            trackNum = val;
-            pos += len.value;
+
+            aPos = aDataStart + aSize.value;
           }
-        } else if (id === 0x83) { // TrackType (1=video, 2=audio, 17=subtitle)
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            trackType = tracksBuffer[pos];
-            pos += len.value;
-          }
-        } else if (id === 0x86) { // CodecID
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            codecId = new TextDecoder().decode(tracksBuffer.slice(pos, pos + len.value)).replace(/\0/g, '');
-            pos += len.value;
-          }
-        } else if (id === 0x53 && tracksBuffer[pos] === 0x6E) { // Name
-          pos++;
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            trackName = new TextDecoder().decode(tracksBuffer.slice(pos, pos + len.value)).replace(/\0/g, '');
-            pos += len.value;
-          }
-        } else if (id === 0x22 && tracksBuffer[pos] === 0xB5 && tracksBuffer[pos + 1] === 0x9C) { // Language
-          pos += 2;
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            language = new TextDecoder().decode(tracksBuffer.slice(pos, pos + len.value)).replace(/\0/g, '');
-            pos += len.value;
-          }
-        } else if (id === 0xE1) { // Audio settings
-          const len = readEbmlVint(tracksBuffer, pos);
-          if (len) {
-            pos += len.length;
-            const aEnd = Math.min(entryEnd, pos + len.value);
-            while (pos < aEnd - 1) {
-              const aId = tracksBuffer[pos];
-              pos++;
-              if (aId === 0x9F) { // Channels
-                const cLen = readEbmlVint(tracksBuffer, pos);
-                if (cLen) {
-                  pos += cLen.length;
-                  channels = tracksBuffer[pos];
-                  pos += cLen.value;
-                }
-              } else if (aId === 0xB5) { // SamplingFrequency
-                const sLen = readEbmlVint(tracksBuffer, pos);
-                if (sLen) {
-                  pos += sLen.length;
-                  pos += sLen.value;
-                }
-              } else {
-                const skip = readEbmlVint(tracksBuffer, pos);
-                if (skip) pos += skip.length + skip.value;
-                else pos++;
-              }
-            }
-          }
-        } else {
-          const skip = readEbmlVint(tracksBuffer, pos);
-          if (skip) pos += skip.length + skip.value;
-          else pos++;
         }
+
+        childPos = cDataEnd;
       }
+
+      const langClean = language !== 'und' ? language : 'und';
 
       if (trackType === 2) { // Audio
         const upper = codecId.toUpperCase();
@@ -387,34 +467,43 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
           upper.includes('TRUEHD');
 
         let cleanCodec = codecId.replace(/^A_/, '');
-        if (cleanCodec === 'EAC3') cleanCodec = 'E-AC-3 (Dolby Digital Plus)';
-        else if (cleanCodec === 'AC3') cleanCodec = 'AC-3 (Dolby Digital)';
+        if (cleanCodec === 'EAC3') cleanCodec = 'E-AC-3';
+        else if (cleanCodec === 'AC3') cleanCodec = 'AC-3';
+
+        const chLabel = channels === 6 ? '5.1ch' : (channels === 2 ? 'Stereo' : `${channels}ch`);
+        const langDisplay = langClean !== 'und' ? langClean.toUpperCase() : 'Audio';
+        const displayName = trackName ? `${trackName} (${chLabel})` : `${langDisplay} Track ${audioTracks.length + 1} (${chLabel})`;
 
         audioTracks.push({
           trackNumber: trackNum,
           type: 'audio',
-          name: trackName || `${language !== 'und' ? language.toUpperCase() : 'Audio'} Track ${audioTracks.length + 1}`,
-          language: language !== 'und' ? language : 'und',
+          name: displayName,
+          language: langClean,
           codec: cleanCodec,
           channels,
           samplingRate,
+          isDefault,
+          isForced,
           isUnsupportedBrowserCodec: isUnsupported
         });
       } else if (trackType === 17) { // Subtitle
         let cleanCodec = codecId.replace(/^S_TEXT\//, '').replace(/^S_/, '');
+        const langDisplay = langClean !== 'und' ? langClean.toUpperCase() : 'Sub';
+        const displayName = trackName ? `${trackName} (${langDisplay})` : `${langDisplay} Track ${subtitleTracks.length + 1}`;
+
         subtitleTracks.push({
           trackNumber: trackNum,
           type: 'subtitle',
-          name: trackName || `${language !== 'und' ? language.toUpperCase() : 'Subtitle'} Track ${subtitleTracks.length + 1}`,
-          language: language !== 'und' ? language : 'und',
-          codec: cleanCodec
+          name: displayName,
+          language: langClean,
+          codec: cleanCodec,
+          isDefault,
+          isForced
         });
       }
-
-      pos = entryEnd;
-    } else {
-      pos++;
     }
+
+    pos = entryDataEnd;
   }
 
   const hasMultiChannel = audioTracks.some((t) => (t.channels || 0) >= 6);
@@ -437,7 +526,7 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
  */
 export async function extractMatroskaSubtitles(file: File, targetTrackNum: number): Promise<string> {
   const cues: SubtitleCue[] = [];
-  const chunkSize = 2 * 1024 * 1024; // 2MB read chunks
+  const chunkSize = 4 * 1024 * 1024; // 4MB read chunks
   let fileOffset = 0;
   let currentClusterTimecode = 0;
 
@@ -447,59 +536,57 @@ export async function extractMatroskaSubtitles(file: File, targetTrackNum: numbe
     if (buf.length < 8) break;
 
     let pos = 0;
-    while (pos < buf.length - 6) {
-      // Cluster ID: 0x1F 0x43 0xB6 0x75
-      if (buf[pos] === 0x1F && buf[pos + 1] === 0x43 && buf[pos + 2] === 0xB6 && buf[pos + 3] === 0x75) {
-        pos += 4;
-        const len = readEbmlVint(buf, pos);
-        if (len) pos += len.length;
+    while (pos < buf.length - 8) {
+      const idInfo = readEbmlId(buf, pos);
+      if (!idInfo) { pos++; continue; }
+
+      const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+      if (!sizeInfo) { pos++; continue; }
+
+      const dataStart = pos + idInfo.length + sizeInfo.length;
+      const dataEnd = dataStart + sizeInfo.value;
+
+      // Cluster element: 0x1F43B675
+      if (idInfo.id === 0x1F43B675) {
+        pos = dataStart; // Enter cluster children
         continue;
       }
 
-      // Timecode element: 0xE7
-      if (buf[pos] === 0xE7) {
-        pos++;
-        const len = readEbmlVint(buf, pos);
-        if (len) {
-          pos += len.length;
-          let tc = 0;
-          for (let k = 0; k < len.value; k++) {
-            tc = (tc * 256) + buf[pos + k];
-          }
-          currentClusterTimecode = tc;
-          pos += len.value;
-          continue;
-        }
+      // Timecode: 0xE7
+      if (idInfo.id === 0xE7) {
+        currentClusterTimecode = readUint(buf, dataStart, sizeInfo.value);
+        pos = dataEnd;
+        continue;
+      }
+
+      // BlockGroup: 0xA0
+      if (idInfo.id === 0xA0) {
+        pos = dataStart; // Enter BlockGroup children
+        continue;
       }
 
       // SimpleBlock (0xA3) or Block (0xA1)
-      if (buf[pos] === 0xA3 || buf[pos] === 0xA1) {
-        pos++;
-        const len = readEbmlVint(buf, pos);
-        if (!len) { pos++; continue; }
-        pos += len.length;
-        const blockEnd = pos + len.value;
-
-        const trackVint = readEbmlVint(buf, pos);
+      if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
+        const trackVint = readEbmlVint(buf, dataStart);
         if (trackVint && trackVint.value === targetTrackNum) {
-          const headerLen = trackVint.length + 2 + 1; // trackNum + relTimecode(2) + flags(1)
-          const relTimecode = (buf[pos + trackVint.length] << 8) | buf[pos + trackVint.length + 1];
+          const headerLen = trackVint.length + 3; // trackVint + relTimecode(2) + flags(1)
+          const relTimecode = (buf[dataStart + trackVint.length] << 8) | buf[dataStart + trackVint.length + 1];
           const signedRelTc = (relTimecode > 0x7FFF) ? relTimecode - 0x10000 : relTimecode;
-          const payloadStart = pos + headerLen;
-          const payloadLen = len.value - headerLen;
+          const payloadStart = dataStart + headerLen;
+          const payloadLen = sizeInfo.value - headerLen;
 
           if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
             const rawBytes = buf.slice(payloadStart, payloadStart + payloadLen);
             let text = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes).trim();
 
-            // Strip ASS/SSA tags (e.g. {\pos(..)}, dialogue formatting fields)
+            // Strip ASS/SSA tags and metadata fields
             if (text.includes(',')) {
               const parts = text.split(',');
               if (parts.length >= 9) {
                 text = parts.slice(8).join(',');
               }
             }
-            text = text.replace(/\{[^}]+\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
+            text = text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
 
             if (text) {
               const startMs = currentClusterTimecode + signedRelTc;
@@ -509,29 +596,29 @@ export async function extractMatroskaSubtitles(file: File, targetTrackNum: numbe
           }
         }
 
-        if (blockEnd > buf.length) {
-          fileOffset += pos + len.value;
-          pos = buf.length;
+        // Advance to next block
+        if (dataEnd > buf.length) {
+          fileOffset += dataEnd;
+          pos = 0;
           break;
         } else {
-          pos = blockEnd;
+          pos = dataEnd;
+          continue;
         }
-        continue;
       }
 
-      // BlockGroup: 0xA0
-      if (buf[pos] === 0xA0) {
-        pos++;
-        const len = readEbmlVint(buf, pos);
-        if (len) pos += len.length;
-        continue;
+      // Skip any other element
+      if (dataEnd > buf.length) {
+        fileOffset += dataEnd;
+        pos = 0;
+        break;
+      } else {
+        pos = dataEnd;
       }
-
-      pos++;
     }
 
-    if (pos >= buf.length - 6) {
-      fileOffset += Math.max(1, pos);
+    if (pos > 0) {
+      fileOffset += pos;
     }
   }
 
@@ -576,7 +663,7 @@ export async function extractAndDecodeEac3Track(
   let detectedSampleRate = 48000;
   let totalSamples = 0;
 
-  const chunkSize = 2 * 1024 * 1024; // 2MB stream slices
+  const chunkSize = 4 * 1024 * 1024; // 4MB stream slices
   let fileOffset = 0;
 
   try {
@@ -588,38 +675,41 @@ export async function extractAndDecodeEac3Track(
       let pos = 0;
       const audioBatch: Uint8Array[] = [];
 
-      while (pos < buf.length - 6) {
-        // Cluster ID: 0x1F 0x43 0xB6 0x75
-        if (buf[pos] === 0x1F && buf[pos + 1] === 0x43 && buf[pos + 2] === 0xB6 && buf[pos + 3] === 0x75) {
-          pos += 4;
-          const len = readEbmlVint(buf, pos);
-          if (len) pos += len.length;
+      while (pos < buf.length - 8) {
+        const idInfo = readEbmlId(buf, pos);
+        if (!idInfo) { pos++; continue; }
+
+        const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+        if (!sizeInfo) { pos++; continue; }
+
+        const dataStart = pos + idInfo.length + sizeInfo.length;
+        const dataEnd = dataStart + sizeInfo.value;
+
+        // Cluster element: 0x1F43B675
+        if (idInfo.id === 0x1F43B675) {
+          pos = dataStart; // Enter cluster
           continue;
         }
 
         // Timecode: 0xE7
-        if (buf[pos] === 0xE7) {
-          pos++;
-          const len = readEbmlVint(buf, pos);
-          if (len) {
-            pos += len.length + len.value;
-            continue;
-          }
+        if (idInfo.id === 0xE7) {
+          pos = dataEnd;
+          continue;
+        }
+
+        // BlockGroup: 0xA0
+        if (idInfo.id === 0xA0) {
+          pos = dataStart; // Enter BlockGroup
+          continue;
         }
 
         // SimpleBlock (0xA3) or Block (0xA1)
-        if (buf[pos] === 0xA3 || buf[pos] === 0xA1) {
-          pos++;
-          const len = readEbmlVint(buf, pos);
-          if (!len) { pos++; continue; }
-          pos += len.length;
-          const blockEnd = pos + len.value;
-
-          const trackVint = readEbmlVint(buf, pos);
+        if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
+          const trackVint = readEbmlVint(buf, dataStart);
           if (trackVint && trackVint.value === targetTrackNum) {
             const headerLen = trackVint.length + 3; // trackNum + relTimecode(2) + flags(1)
-            const payloadStart = pos + headerLen;
-            const payloadLen = len.value - headerLen;
+            const payloadStart = dataStart + headerLen;
+            const payloadLen = sizeInfo.value - headerLen;
 
             if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
               const rawFrame = buf.slice(payloadStart, payloadStart + payloadLen);
@@ -627,28 +717,27 @@ export async function extractAndDecodeEac3Track(
             }
           }
 
-          if (blockEnd > buf.length) {
-            fileOffset += pos + len.value;
-            pos = buf.length;
+          if (dataEnd > buf.length) {
+            fileOffset += dataEnd;
+            pos = 0;
             break;
           } else {
-            pos = blockEnd;
+            pos = dataEnd;
+            continue;
           }
-          continue;
         }
 
-        // BlockGroup: 0xA0
-        if (buf[pos] === 0xA0) {
-          pos++;
-          const len = readEbmlVint(buf, pos);
-          if (len) pos += len.length;
-          continue;
+        // Skip any other element
+        if (dataEnd > buf.length) {
+          fileOffset += dataEnd;
+          pos = 0;
+          break;
+        } else {
+          pos = dataEnd;
         }
-
-        pos++;
       }
 
-      // If we collected audio frames in this chunk, feed them to WASM decoder
+      // If audio frames were collected in this chunk, feed them to WASM decoder
       if (audioBatch.length > 0) {
         let totalBatchBytes = 0;
         for (const b of audioBatch) totalBatchBytes += b.length;
@@ -670,10 +759,10 @@ export async function extractAndDecodeEac3Track(
             const rightStereo = new Float32Array(numSamples);
 
             if (numChannels >= 6) {
-              // ITU-R BS.775 5.1 downmixing with dialogue boost
+              // ITU-R BS.775 5.1-to-Stereo downmixing with dialogue boost
               const fl = decoded.channelData[0];
               const fr = decoded.channelData[1];
-              const fc = decoded.channelData[2]; // Centre
+              const fc = decoded.channelData[2]; // Centre dialogue
               const lfe = decoded.channelData[3];
               const bl = decoded.channelData[4];
               const br = decoded.channelData[5];
@@ -697,8 +786,8 @@ export async function extractAndDecodeEac3Track(
         }
       }
 
-      if (pos >= buf.length - 6) {
-        fileOffset += Math.max(1, pos);
+      if (pos > 0) {
+        fileOffset += pos;
       }
 
       if (onProgress) {

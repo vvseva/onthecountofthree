@@ -412,4 +412,159 @@ test('Fullscreen Controls Auto-Hide & Bottom Progress state machine', () => {
   assert.equal(ctrl.isControlsHidden, false);
 });
 
+test('EBML Multi-Track Parser: Successfully parses WEB-DL with 2x AC-3 5.1 and 3x UTF-8 Subtitle tracks', () => {
+  function readEbmlVint(buffer, offset) {
+    if (offset >= buffer.length) return null;
+    const firstByte = buffer[offset];
+    if (firstByte === 0) return null;
+    let length = 1;
+    let mask = 0x80;
+    while ((firstByte & mask) === 0 && length <= 8) {
+      length++;
+      mask >>= 1;
+    }
+    if (offset + length > buffer.length) return null;
+    let value = firstByte & (mask - 1);
+    for (let i = 1; i < length; i++) {
+      value = (value * 256) + buffer[offset + i];
+    }
+    return { value, length };
+  }
+
+  function readEbmlId(buffer, offset) {
+    if (offset >= buffer.length) return null;
+    const firstByte = buffer[offset];
+    if (firstByte === 0) return null;
+    let length = 1;
+    let mask = 0x80;
+    while ((firstByte & mask) === 0 && length <= 4) {
+      length++;
+      mask >>= 1;
+    }
+    if (offset + length > buffer.length) return null;
+    let id = 0;
+    for (let i = 0; i < length; i++) {
+      id = (id * 256) + buffer[offset + i];
+    }
+    return { id, length };
+  }
+
+  function readUint(buffer, offset, length) {
+    let val = 0;
+    for (let i = 0; i < length; i++) val = (val * 256) + buffer[offset + i];
+    return val;
+  }
+
+  // Helper to build a TrackEntry
+  function buildTrackEntry(trackNum, trackType, codecStr, langStr, nameStr, isDefault, channels) {
+    const enc = new TextEncoder();
+    const codecBytes = enc.encode(codecStr);
+    const langBytes = enc.encode(langStr);
+    const nameBytes = nameStr ? enc.encode(nameStr) : null;
+
+    const parts = [
+      0x73, 0x73, 0x84, 0x11, 0x22, 0x33, trackNum, // TrackUID (0x7373)
+      0xD7, 0x81, trackNum,                         // TrackNumber (0xD7)
+      0x83, 0x81, trackType,                        // TrackType (0x83)
+      0x88, 0x81, isDefault ? 1 : 0,                // FlagDefault (0x88)
+      0x86, 0x80 | codecBytes.length, ...codecBytes,// CodecID (0x86)
+      0x22, 0xB5, 0x9C, 0x80 | langBytes.length, ...langBytes // Language
+    ];
+
+    if (nameBytes) {
+      parts.push(0x53, 0x6E, 0x80 | nameBytes.length, ...nameBytes); // Name (0x536E)
+    }
+
+    if (channels) {
+      parts.push(0xE1, 0x83, 0x9F, 0x81, channels); // Audio (0xE1) -> Channels (0x9F)
+    }
+
+    return [0xAE, 0x80 | parts.length, ...parts];
+  }
+
+  const tracksBuf = new Uint8Array([
+    // Tracks (0x1654AE6B)
+    0x16, 0x54, 0xAE, 0x6B, 0x80 | 120,
+    ...buildTrackEntry(1, 1, 'V_MPEG4/ISO/AVC', 'eng', '', true, 0),
+    ...buildTrackEntry(2, 2, 'A_AC3', 'rus', 'Dolby Digital', true, 6),
+    ...buildTrackEntry(3, 2, 'A_AC3', 'eng', 'Dolby Digital', false, 6),
+    ...buildTrackEntry(4, 17, 'S_TEXT/UTF8', 'rus', 'Forced', true, 0),
+    ...buildTrackEntry(5, 17, 'S_TEXT/UTF8', 'rus', 'Full', false, 0),
+    ...buildTrackEntry(6, 17, 'S_TEXT/UTF8', 'eng', '', false, 0)
+  ]);
+
+  // Parse using our parser
+  let pos = 5; // after Tracks header
+  const audioTracks = [];
+  const subtitleTracks = [];
+
+  while (pos < tracksBuf.length) {
+    const entryId = readEbmlId(tracksBuf, pos);
+    if (!entryId) break;
+    const entrySize = readEbmlVint(tracksBuf, pos + entryId.length);
+    if (!entrySize) break;
+    const entryDataStart = pos + entryId.length + entrySize.length;
+    const entryDataEnd = entryDataStart + entrySize.value;
+
+    if (entryId.id === 0xAE) {
+      let tNum = 0, tType = 0, tCodec = '', tLang = 'und', tName = '', tDefault = false, tCh = 2;
+      let cPos = entryDataStart;
+      while (cPos < entryDataEnd) {
+        const cId = readEbmlId(tracksBuf, cPos);
+        if (!cId) break;
+        const cSize = readEbmlVint(tracksBuf, cPos + cId.length);
+        if (!cSize) break;
+        const cStart = cPos + cId.length + cSize.length;
+        const cEnd = cStart + cSize.value;
+
+        if (cId.id === 0xD7) tNum = readUint(tracksBuf, cStart, cSize.value);
+        if (cId.id === 0x83) tType = readUint(tracksBuf, cStart, cSize.value);
+        if (cId.id === 0x88) tDefault = readUint(tracksBuf, cStart, cSize.value) === 1;
+        if (cId.id === 0x86) tCodec = new TextDecoder().decode(tracksBuf.slice(cStart, cEnd));
+        if (cId.id === 0x22B59C) tLang = new TextDecoder().decode(tracksBuf.slice(cStart, cEnd));
+        if (cId.id === 0x536E) tName = new TextDecoder().decode(tracksBuf.slice(cStart, cEnd));
+        if (cId.id === 0xE1) {
+          let aPos = cStart;
+          while (aPos < cEnd) {
+            const aId = readEbmlId(tracksBuf, aPos);
+            if (!aId) break;
+            const aSize = readEbmlVint(tracksBuf, aPos + aId.length);
+            if (!aSize) break;
+            if (aId.id === 0x9F) tCh = readUint(tracksBuf, aPos + aId.length + aSize.length, aSize.value);
+            aPos += aId.length + aSize.length + aSize.value;
+          }
+        }
+        cPos = cEnd;
+      }
+
+      if (tType === 2) {
+        audioTracks.push({ trackNumber: tNum, codec: tCodec, language: tLang, name: tName, isDefault: tDefault, channels: tCh });
+      } else if (tType === 17) {
+        subtitleTracks.push({ trackNumber: tNum, codec: tCodec, language: tLang, name: tName, isDefault: tDefault });
+      }
+    }
+    pos = entryDataEnd;
+  }
+
+  assert.equal(audioTracks.length, 2, 'Must detect both Russian and English audio tracks');
+  assert.equal(audioTracks[0].trackNumber, 2);
+  assert.equal(audioTracks[0].language, 'rus');
+  assert.equal(audioTracks[0].codec, 'A_AC3');
+  assert.equal(audioTracks[0].channels, 6);
+  assert.equal(audioTracks[0].isDefault, true);
+
+  assert.equal(audioTracks[1].trackNumber, 3);
+  assert.equal(audioTracks[1].language, 'eng');
+  assert.equal(audioTracks[1].codec, 'A_AC3');
+  assert.equal(audioTracks[1].channels, 6);
+
+  assert.equal(subtitleTracks.length, 3, 'Must detect all 3 subtitle tracks');
+  assert.equal(subtitleTracks[0].name, 'Forced');
+  assert.equal(subtitleTracks[0].language, 'rus');
+  assert.equal(subtitleTracks[1].name, 'Full');
+  assert.equal(subtitleTracks[1].language, 'rus');
+  assert.equal(subtitleTracks[2].language, 'eng');
+});
+
+
 

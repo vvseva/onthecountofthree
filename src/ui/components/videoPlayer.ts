@@ -655,8 +655,8 @@ export class VideoPlayerComponent {
       demux.subtitleTracks.forEach((t) => {
         const opt = document.createElement('option');
         opt.value = `sub_${t.trackNumber}`;
-        const langStr = t.language !== 'und' ? ` (${t.language.toUpperCase()})` : '';
-        opt.textContent = `${t.name}${langStr} [${t.codec}] (Embedded)`;
+        const defTag = t.isDefault ? ' [Default]' : (t.isForced ? ' [Forced]' : '');
+        opt.textContent = `${t.name}${defTag} [${t.codec}] (Embedded)`;
         this.subSelectEl.appendChild(opt);
       });
     }
@@ -672,7 +672,7 @@ export class VideoPlayerComponent {
 
     const defaultOpt = document.createElement('option');
     defaultOpt.value = 'default';
-    defaultOpt.textContent = 'Default Audio (Embedded)';
+    defaultOpt.textContent = 'Default Audio (Native)';
     this.audioSelectEl.appendChild(defaultOpt);
 
     // 1. Native tracks (Safari / supported browser)
@@ -693,7 +693,8 @@ export class VideoPlayerComponent {
         const chStr = t.channels === 6 ? ' 5.1ch' : (t.channels === 2 ? ' Stereo' : ` ${t.channels || 2}ch`);
         const langStr = t.language !== 'und' ? ` (${t.language.toUpperCase()})` : '';
         const badge = t.isUnsupportedBrowserCodec ? ' [Dolby WASM Decode]' : '';
-        opt.textContent = `${t.name}${langStr} [${t.codec}${chStr}]${badge}`;
+        const defTag = t.isDefault ? ' [Default]' : '';
+        opt.textContent = `${t.name}${langStr} [${t.codec}${chStr}]${defTag}${badge}`;
         this.audioSelectEl.appendChild(opt);
       });
     }
@@ -745,12 +746,14 @@ export class VideoPlayerComponent {
     }
 
     // Auto-decode E-AC-3 / AC-3 audio track if present (solves WEB-DL silence on Chromium)
-    const eac3Track = demux.audioTracks.find((t) => t.isUnsupportedBrowserCodec);
+    const eac3Track = demux.audioTracks.find((t) => t.isDefault && t.isUnsupportedBrowserCodec)
+      || demux.audioTracks.find((t) => t.isUnsupportedBrowserCodec);
+
     if (eac3Track) {
       this.eac3StatusPill.style.display = 'inline-block';
       this.eac3StatusPill.textContent = '⏳ Decoding Dolby Audio (0%)...';
-      this.callbacks.onLog(`[Audio] WEB-DL ${eac3Track.codec} audio detected. Starting WASM libavcodec decode...`);
-      this.callbacks.onAnnounce('Decoding Dolby Digital audio for browser playback');
+      this.callbacks.onLog(`[Audio] WEB-DL ${eac3Track.codec} audio detected (${eac3Track.name}). Starting WASM libavcodec decode...`);
+      this.callbacks.onAnnounce(`Decoding Dolby Digital audio: ${eac3Track.name}`);
 
       // Mark the track as selected in the dropdown
       const selOpt = this.audioSelectEl.querySelector(`option[value="audio_${eac3Track.trackNumber}"]`) as HTMLOptionElement;
@@ -760,10 +763,11 @@ export class VideoPlayerComponent {
         await this.subtitleManager.decodeAndPlayEac3Audio(eac3Track.trackNumber, (pct) => {
           this.eac3StatusPill.textContent = `⏳ Decoding Dolby Audio (${pct}%)...`;
         });
-        this.eac3StatusPill.textContent = '✔ Dolby 5.1 Stereo Ready';
+        const langCode = eac3Track.language !== 'und' ? eac3Track.language.toUpperCase() : 'Audio';
+        this.eac3StatusPill.textContent = `✔ ${langCode} 5.1 Ready`;
         this.eac3StatusPill.style.color = '#008000';
-        this.callbacks.onLog('[Audio] Dolby Digital E-AC-3 / AC-3 audio decoded and active!');
-        this.callbacks.onAnnounce('Dolby Digital audio decoded and ready');
+        this.callbacks.onLog(`[Audio] Dolby Digital audio (${eac3Track.name}) decoded and active!`);
+        this.callbacks.onAnnounce(`Dolby Digital audio ready: ${eac3Track.name}`);
       } catch (err) {
         this.eac3StatusPill.textContent = '⚠ Audio Decode Error';
         this.eac3StatusPill.style.color = '#cc0000';
@@ -771,6 +775,19 @@ export class VideoPlayerComponent {
       }
     } else {
       this.eac3StatusPill.style.display = 'none';
+    }
+
+    // If default or forced subtitle track exists, auto-select it
+    const defaultSub = demux.subtitleTracks.find((t) => t.isDefault || t.isForced);
+    if (defaultSub) {
+      const subOpt = this.subSelectEl.querySelector(`option[value="sub_${defaultSub.trackNumber}"]`) as HTMLOptionElement;
+      if (subOpt) {
+        subOpt.selected = true;
+        this.subtitleManager.extractAndApplyEmbeddedSubtitle(defaultSub.trackNumber).then((label) => {
+          (this.element.querySelector('#sub-offset-group') as HTMLElement).style.display = 'flex';
+          this.callbacks.onLog(`[Subtitles] Default subtitle track active: ${label}`);
+        }).catch(() => {});
+      }
     }
 
     const duration = await extractVideoDuration(this.video);
