@@ -42,6 +42,7 @@ export class VideoPlayerComponent {
   private countdownNumberEl: HTMLElement;
   private pauseBannerOverlay: HTMLElement;
   private pauseBannerTextEl: HTMLElement;
+  private subtitlesOverlay: HTMLElement;
 
   // Subtitles & Audio
   private subtitleManager: SubtitleAndAudioManager;
@@ -94,6 +95,9 @@ export class VideoPlayerComponent {
               <span id="pause-banner-text">Playback Paused</span>
             </div>
           </div>
+
+          <!-- On-Screen Live Subtitles Overlay -->
+          <div class="subtitles-overlay" id="subtitles-overlay" style="display: none;" aria-live="polite"></div>
 
           <!-- Dropzone Overlay -->
           <div class="dropzone-overlay" id="dropzone-overlay">
@@ -218,6 +222,7 @@ export class VideoPlayerComponent {
     this.countdownNumberEl = this.element.querySelector('#countdown-number')!;
     this.pauseBannerOverlay = this.element.querySelector('#pause-banner-overlay')!;
     this.pauseBannerTextEl = this.element.querySelector('#pause-banner-text')!;
+    this.subtitlesOverlay = this.element.querySelector('#subtitles-overlay')!;
 
     // Subtitles & Audio
     this.subtitleManager = new SubtitleAndAudioManager(this.video);
@@ -248,7 +253,10 @@ export class VideoPlayerComponent {
   private setupEvents(): void {
     // Dropzone file picker
     const browseBtn = this.element.querySelector('#btn-browse-file')!;
-    browseBtn.addEventListener('click', () => this.fileInput.click());
+    browseBtn.addEventListener('click', () => {
+      this.subtitleManager.resumeAudioContext();
+      this.fileInput.click();
+    });
 
     this.element.querySelector('#btn-change-file')!.addEventListener('click', () => {
       if (confirm('Change local video file? This will pause playback and reset stream verification.')) {
@@ -258,6 +266,7 @@ export class VideoPlayerComponent {
     });
 
     this.fileInput.addEventListener('change', () => {
+      this.subtitleManager.resumeAudioContext();
       if (this.fileInput.files && this.fileInput.files[0]) {
         this.loadVideoFile(this.fileInput.files[0]);
       }
@@ -265,6 +274,7 @@ export class VideoPlayerComponent {
 
     // Subtitle file input
     this.subFileInput.addEventListener('change', async () => {
+      this.subtitleManager.resumeAudioContext();
       if (this.subFileInput.files && this.subFileInput.files[0]) {
         await this.handleLoadedSubtitle(this.subFileInput.files[0]);
       }
@@ -272,11 +282,14 @@ export class VideoPlayerComponent {
 
     // Subtitle track selection
     this.subSelectEl.addEventListener('change', async () => {
+      this.subtitleManager.resumeAudioContext();
       const val = this.subSelectEl.value;
       if (val === 'load') {
         this.subFileInput.click();
       } else if (val === 'none') {
         this.subtitleManager.disableSubtitles();
+        this.subtitlesOverlay.style.display = 'none';
+        this.subtitlesOverlay.textContent = '';
         (this.element.querySelector('#sub-offset-group') as HTMLElement).style.display = 'none';
         this.callbacks.onAnnounce('Subtitles turned off');
       } else if (val.startsWith('sub_')) {
@@ -303,6 +316,7 @@ export class VideoPlayerComponent {
 
     // Audio file input & track selection
     this.audioFileInput.addEventListener('change', () => {
+      this.subtitleManager.resumeAudioContext();
       if (this.audioFileInput.files && this.audioFileInput.files[0]) {
         const file = this.audioFileInput.files[0];
         const loadedName = this.subtitleManager.loadExternalAudio(file);
@@ -313,6 +327,7 @@ export class VideoPlayerComponent {
     });
 
     this.audioSelectEl.addEventListener('change', async () => {
+      this.subtitleManager.resumeAudioContext();
       const val = this.audioSelectEl.value;
       if (val === 'load') {
         this.audioFileInput.click();
@@ -328,27 +343,23 @@ export class VideoPlayerComponent {
         const demux = this.subtitleManager.getDemuxResult();
         const trk = demux?.audioTracks.find((t) => t.trackNumber === trkNum);
 
-        if (trk && trk.isUnsupportedBrowserCodec) {
-          // Decode E-AC-3 / AC-3 track on demand
-          this.callbacks.onLog(`[Audio] Decoding track #${trkNum} (${trk.codec})...`);
-          this.eac3StatusPill.style.display = 'inline-block';
-          this.eac3StatusPill.textContent = '⏳ Decoding Audio (0%)...';
-          try {
-            await this.subtitleManager.decodeAndPlayEac3Audio(trkNum, (pct) => {
-              this.eac3StatusPill.textContent = `⏳ Decoding Audio (${pct}%)...`;
-            });
-            this.eac3StatusPill.textContent = '✔ Dolby Audio Active';
-            this.eac3StatusPill.style.color = '#008000';
-            this.callbacks.onLog(`[Audio] Track #${trkNum} decoded and active!`);
-            this.callbacks.onAnnounce(`Track ${trkNum} decoded and active`);
-          } catch (err) {
-            this.eac3StatusPill.textContent = '⚠ Audio Decode Error';
-            this.eac3StatusPill.style.color = '#cc0000';
-            this.callbacks.onLog(`[Audio Error] Could not decode track: ${err}`, 'error');
-          }
-        } else {
-          this.subtitleManager.useDefaultEmbeddedAudio();
-          this.callbacks.onLog(`[Audio] Selected track #${trkNum}`);
+        // Always decode and synchronize chosen MKV audio track
+        this.callbacks.onLog(`[Audio] Decoding track #${trkNum} (${trk?.name || trk?.codec || ''})...`);
+        this.eac3StatusPill.style.display = 'inline-block';
+        this.eac3StatusPill.textContent = '⏳ Decoding Audio (0%)...';
+        try {
+          await this.subtitleManager.decodeAndPlayEac3Audio(trkNum, (pct) => {
+            this.eac3StatusPill.textContent = `⏳ Decoding Audio (${pct}%)...`;
+          });
+          const langCode = trk && trk.language !== 'und' ? trk.language.toUpperCase() : 'Audio';
+          this.eac3StatusPill.textContent = `✔ ${langCode} Active`;
+          this.eac3StatusPill.style.color = '#008000';
+          this.callbacks.onLog(`[Audio] Track #${trkNum} decoded and active!`);
+          this.callbacks.onAnnounce(`Track ${trkNum} active: ${trk?.name || 'Selected Audio'}`);
+        } catch (err) {
+          this.eac3StatusPill.textContent = '⚠ Audio Decode Error';
+          this.eac3StatusPill.style.color = '#cc0000';
+          this.callbacks.onLog(`[Audio Error] Could not decode track: ${err}`, 'error');
         }
       }
     });
@@ -402,11 +413,13 @@ export class VideoPlayerComponent {
 
     // Play/Pause button
     this.playPauseBtn.addEventListener('click', () => {
+      this.subtitleManager.resumeAudioContext();
       this.triggerPlayPauseAction();
     });
 
     // Clicking video viewport toggles play/pause (or shows controls in fullscreen)
     this.videoViewport.addEventListener('click', (e) => {
+      this.subtitleManager.resumeAudioContext();
       // Ignore clicks on dropzone or countdown
       if (this.dropzone.style.display !== 'none') return;
       if (this.countdownOverlay.style.display !== 'none') return;
@@ -422,6 +435,15 @@ export class VideoPlayerComponent {
         this.scrubber.value = pct.toString();
         this.fsProgressFill.style.width = `${pct}%`;
         this.updateTimeDisplay(this.video.currentTime, this.video.duration);
+      }
+
+      // Live Subtitle Overlay Rendering
+      const subText = this.subtitleManager.getActiveSubtitleText(this.video.currentTime);
+      if (subText) {
+        this.subtitlesOverlay.textContent = subText;
+        this.subtitlesOverlay.style.display = 'block';
+      } else {
+        this.subtitlesOverlay.style.display = 'none';
       }
     });
 
@@ -520,6 +542,8 @@ export class VideoPlayerComponent {
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
       }
+
+      this.subtitleManager.resumeAudioContext();
 
       if (e.code === 'Space') {
         e.preventDefault();
@@ -804,6 +828,7 @@ export class VideoPlayerComponent {
   // ================= Countdown Play Engine =================
 
   public triggerPlayPauseAction(): void {
+    this.subtitleManager.resumeAudioContext();
     if (this.countdownTimer) {
       this.cancelCountdown();
       this.callbacks.onUserPauseRequest();
@@ -818,6 +843,7 @@ export class VideoPlayerComponent {
   }
 
   public startSynchronizedCountdown(targetStartTime: number, onComplete: () => void): void {
+    this.subtitleManager.resumeAudioContext();
     this.cancelCountdown();
     this.countdownOverlay.style.display = 'flex';
 

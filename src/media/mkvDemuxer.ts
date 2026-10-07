@@ -31,10 +31,15 @@ export interface DemuxResult {
   hasUnsupportedAudio: boolean;
 }
 
-interface SubtitleCue {
+export interface SubtitleCue {
   startMs: number;
   endMs: number;
   text: string;
+}
+
+export interface ExtractedSubtitlesResult {
+  vttText: string;
+  cues: SubtitleCue[];
 }
 
 /**
@@ -89,9 +94,6 @@ export function readEbmlId(buffer: Uint8Array, offset: number): { id: number; le
   return { id, length };
 }
 
-/**
- * Parses integer value from buffer bytes.
- */
 function readUint(buffer: Uint8Array, offset: number, length: number): number {
   let val = 0;
   for (let i = 0; i < length; i++) {
@@ -100,9 +102,6 @@ function readUint(buffer: Uint8Array, offset: number, length: number): number {
   return val;
 }
 
-/**
- * Parses float value (32-bit or 64-bit IEEE 754) from buffer bytes.
- */
 function readFloat(buffer: Uint8Array, offset: number, length: number): number {
   if (length === 4) {
     const dv = new DataView(buffer.buffer, buffer.byteOffset + offset, 4);
@@ -112,6 +111,11 @@ function readFloat(buffer: Uint8Array, offset: number, length: number): number {
     return dv.getFloat64(0, false);
   }
   return 48000;
+}
+
+async function readNextSlice(file: File, offset: number, size: number): Promise<Uint8Array> {
+  const slice = file.slice(offset, Math.min(file.size, offset + size));
+  return new Uint8Array(await slice.arrayBuffer());
 }
 
 /**
@@ -125,7 +129,6 @@ async function locateMatroskaTracksOffset(file: File): Promise<{ tracksOffset: n
   let tracksOffset = -1;
   let timecodeScale = 1000000; // default 1ms
 
-  // Search for Segment element: 0x18, 0x53, 0x80, 0x67
   let pos = 0;
   while (pos < buf.length - 8) {
     const idInfo = readEbmlId(buf, pos);
@@ -144,7 +147,6 @@ async function locateMatroskaTracksOffset(file: File): Promise<{ tracksOffset: n
     pos++;
   }
 
-  // Inside Segment: parse children (SeekHead, Info, Tracks)
   while (pos < buf.length - 8) {
     const idInfo = readEbmlId(buf, pos);
     if (!idInfo) break;
@@ -160,7 +162,6 @@ async function locateMatroskaTracksOffset(file: File): Promise<{ tracksOffset: n
     }
 
     if (idInfo.id === 0x1549A966) { // Info
-      // Check for TimecodeScale (0x2AD7B1)
       let infoPos = dataStart;
       while (infoPos < dataEnd && infoPos < buf.length - 4) {
         const iId = readEbmlId(buf, infoPos);
@@ -348,7 +349,6 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
   const headSlice = file.slice(0, 16);
   const headBytes = new Uint8Array(await headSlice.arrayBuffer());
 
-  // Check MP4 signature
   if (
     headBytes.length > 8 &&
     (String.fromCharCode(headBytes[4], headBytes[5], headBytes[6], headBytes[7]) === 'ftyp' ||
@@ -372,7 +372,6 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
     tracksBuffer = new Uint8Array(await slice.arrayBuffer());
   }
 
-  // Find Tracks element: 0x1654AE6B
   let tracksDataStart = 0;
   let tracksDataEnd = tracksBuffer.length;
 
@@ -388,7 +387,6 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
     }
   }
 
-  // Parse TrackEntry (0xAE) children inside Tracks element
   let pos = tracksDataStart;
   while (pos < tracksDataEnd - 4) {
     const entryId = readEbmlId(tracksBuffer, pos);
@@ -420,21 +418,21 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
         const cDataStart = childPos + cId.length + cSize.length;
         const cDataEnd = cDataStart + cSize.value;
 
-        if (cId.id === 0xD7) { // TrackNumber
+        if (cId.id === 0xD7) {
           trackNum = readUint(tracksBuffer, cDataStart, cSize.value);
-        } else if (cId.id === 0x83) { // TrackType (1=video, 2=audio, 17=subtitle)
+        } else if (cId.id === 0x83) {
           trackType = readUint(tracksBuffer, cDataStart, cSize.value);
-        } else if (cId.id === 0x88) { // FlagDefault
+        } else if (cId.id === 0x88) {
           isDefault = readUint(tracksBuffer, cDataStart, cSize.value) === 1;
-        } else if (cId.id === 0x55AA) { // FlagForced
+        } else if (cId.id === 0x55AA) {
           isForced = readUint(tracksBuffer, cDataStart, cSize.value) === 1;
-        } else if (cId.id === 0x86) { // CodecID
+        } else if (cId.id === 0x86) {
           codecId = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '');
-        } else if (cId.id === 0x536E) { // Name / Title
+        } else if (cId.id === 0x536E) {
           trackName = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
-        } else if (cId.id === 0x22B59C) { // Language
+        } else if (cId.id === 0x22B59C) {
           language = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
-        } else if (cId.id === 0xE1) { // Audio settings
+        } else if (cId.id === 0xE1) {
           let aPos = cDataStart;
           while (aPos < cDataEnd - 2) {
             const aId = readEbmlId(tracksBuffer, aPos);
@@ -443,9 +441,9 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
             if (!aSize) break;
             const aDataStart = aPos + aId.length + aSize.length;
 
-            if (aId.id === 0x9F) { // Channels
+            if (aId.id === 0x9F) {
               channels = readUint(tracksBuffer, aDataStart, aSize.value);
-            } else if (aId.id === 0xB5) { // SamplingFrequency
+            } else if (aId.id === 0xB5) {
               samplingRate = readFloat(tracksBuffer, aDataStart, aSize.value);
             }
 
@@ -523,106 +521,132 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
 
 /**
  * Extracts an embedded subtitle track from Matroska clusters and converts to WebVTT.
+ * Returns both the WebVTT string and the structured cues list for DOM overlay rendering.
  */
-export async function extractMatroskaSubtitles(file: File, targetTrackNum: number): Promise<string> {
+export async function extractMatroskaSubtitles(file: File, targetTrackNum: number): Promise<ExtractedSubtitlesResult> {
   const cues: SubtitleCue[] = [];
-  const chunkSize = 4 * 1024 * 1024; // 4MB read chunks
+  const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB sliding buffer
   let fileOffset = 0;
   let currentClusterTimecode = 0;
 
-  while (fileOffset < file.size) {
-    const sliceEnd = Math.min(file.size, fileOffset + chunkSize);
-    const buf = new Uint8Array(await file.slice(fileOffset, sliceEnd).arrayBuffer());
-    if (buf.length < 8) break;
+  let buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+  let pos = 0;
 
-    let pos = 0;
-    while (pos < buf.length - 8) {
-      const idInfo = readEbmlId(buf, pos);
-      if (!idInfo) { pos++; continue; }
+  while (fileOffset + pos < file.size) {
+    // If fewer than 64KB remain in buffer and more file remains, slide window
+    if (pos > buf.length - 65536 && fileOffset + buf.length < file.size) {
+      fileOffset += pos;
+      buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+      pos = 0;
+    }
 
-      const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
-      if (!sizeInfo) { pos++; continue; }
+    if (pos >= buf.length) break;
 
-      const dataStart = pos + idInfo.length + sizeInfo.length;
-      const dataEnd = dataStart + sizeInfo.value;
+    const idInfo = readEbmlId(buf, pos);
+    if (!idInfo) {
+      if (fileOffset + buf.length >= file.size) break;
+      fileOffset += pos;
+      buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+      pos = 0;
+      continue;
+    }
 
-      // Cluster element: 0x1F43B675
-      if (idInfo.id === 0x1F43B675) {
-        pos = dataStart; // Enter cluster children
-        continue;
+    const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+    if (!sizeInfo) {
+      if (fileOffset + buf.length >= file.size) break;
+      fileOffset += pos;
+      buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+      pos = 0;
+      continue;
+    }
+
+    const dataStart = pos + idInfo.length + sizeInfo.length;
+    const dataEnd = dataStart + sizeInfo.value;
+
+    // 0. Segment element: 0x18538067
+    if (idInfo.id === 0x18538067) {
+      pos = dataStart; // enter Segment children
+      continue;
+    }
+
+    // 1. Cluster element: 0x1F43B675
+    if (idInfo.id === 0x1F43B675) {
+      pos = dataStart; // enter cluster children
+      continue;
+    }
+
+    // 2. Timecode: 0xE7
+    if (idInfo.id === 0xE7) {
+      currentClusterTimecode = readUint(buf, dataStart, sizeInfo.value);
+      pos = dataEnd;
+      continue;
+    }
+
+    // 3. BlockGroup: 0xA0
+    if (idInfo.id === 0xA0) {
+      pos = dataStart; // enter BlockGroup children
+      continue;
+    }
+
+    // 3b. BlockDuration: 0x9B (duration for preceding subtitle Block in BlockGroup)
+    if (idInfo.id === 0x9B && cues.length > 0) {
+      const dur = readUint(buf, dataStart, sizeInfo.value);
+      if (dur > 0) {
+        cues[cues.length - 1].endMs = cues[cues.length - 1].startMs + dur;
       }
+      pos = dataEnd;
+      continue;
+    }
 
-      // Timecode: 0xE7
-      if (idInfo.id === 0xE7) {
-        currentClusterTimecode = readUint(buf, dataStart, sizeInfo.value);
-        pos = dataEnd;
-        continue;
-      }
+    // 4. SimpleBlock (0xA3) or Block (0xA1)
+    if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
+      const trackVint = readEbmlVint(buf, dataStart);
+      if (trackVint && trackVint.value === targetTrackNum) {
+        const headerLen = trackVint.length + 3; // trackNum + relTimecode(2) + flags(1)
+        const relTimecode = (buf[dataStart + trackVint.length] << 8) | buf[dataStart + trackVint.length + 1];
+        const signedRelTc = (relTimecode > 0x7FFF) ? relTimecode - 0x10000 : relTimecode;
+        const payloadStart = dataStart + headerLen;
+        const payloadLen = sizeInfo.value - headerLen;
 
-      // BlockGroup: 0xA0
-      if (idInfo.id === 0xA0) {
-        pos = dataStart; // Enter BlockGroup children
-        continue;
-      }
+        if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
+          const rawBytes = buf.slice(payloadStart, payloadStart + payloadLen);
+          let text = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes).trim();
 
-      // SimpleBlock (0xA3) or Block (0xA1)
-      if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
-        const trackVint = readEbmlVint(buf, dataStart);
-        if (trackVint && trackVint.value === targetTrackNum) {
-          const headerLen = trackVint.length + 3; // trackVint + relTimecode(2) + flags(1)
-          const relTimecode = (buf[dataStart + trackVint.length] << 8) | buf[dataStart + trackVint.length + 1];
-          const signedRelTc = (relTimecode > 0x7FFF) ? relTimecode - 0x10000 : relTimecode;
-          const payloadStart = dataStart + headerLen;
-          const payloadLen = sizeInfo.value - headerLen;
+          // Strip ASS/SSA style tags
+          text = text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
 
-          if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
-            const rawBytes = buf.slice(payloadStart, payloadStart + payloadLen);
-            let text = new TextDecoder('utf-8', { fatal: false }).decode(rawBytes).trim();
-
-            // Strip ASS/SSA tags and metadata fields
-            if (text.includes(',')) {
-              const parts = text.split(',');
-              if (parts.length >= 9) {
-                text = parts.slice(8).join(',');
-              }
-            }
-            text = text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
-
-            if (text) {
-              const startMs = currentClusterTimecode + signedRelTc;
-              const endMs = startMs + 3500;
-              cues.push({ startMs, endMs, text });
-            }
+          if (text) {
+            const startMs = currentClusterTimecode + signedRelTc;
+            const endMs = startMs + 3500;
+            cues.push({ startMs, endMs, text });
           }
         }
-
-        // Advance to next block
-        if (dataEnd > buf.length) {
-          fileOffset += dataEnd;
-          pos = 0;
-          break;
-        } else {
-          pos = dataEnd;
-          continue;
-        }
       }
 
-      // Skip any other element
       if (dataEnd > buf.length) {
         fileOffset += dataEnd;
+        if (fileOffset >= file.size) break;
+        buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
         pos = 0;
-        break;
+        continue;
       } else {
         pos = dataEnd;
+        continue;
       }
     }
 
-    if (pos > 0) {
-      fileOffset += pos;
+    // Skip any other element
+    if (dataEnd > buf.length) {
+      fileOffset += dataEnd;
+      if (fileOffset >= file.size) break;
+      buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+      pos = 0;
+      continue;
+    } else {
+      pos = dataEnd;
     }
   }
 
-  // Format cues into WebVTT
   cues.sort((a, b) => a.startMs - b.startMs);
 
   let vtt = 'WEBVTT\n\n';
@@ -633,7 +657,7 @@ export async function extractMatroskaSubtitles(file: File, targetTrackNum: numbe
     vtt += `${formatVttTime(cue.startMs)} --> ${formatVttTime(finalEnd)}\n${cue.text}\n\n`;
   }
 
-  return vtt;
+  return { vttText: vtt, cues };
 }
 
 function formatVttTime(ms: number): string {
@@ -663,135 +687,193 @@ export async function extractAndDecodeEac3Track(
   let detectedSampleRate = 48000;
   let totalSamples = 0;
 
-  const chunkSize = 4 * 1024 * 1024; // 4MB stream slices
+  const CHUNK_SIZE = 4 * 1024 * 1024; // 4MB sliding buffer
   let fileOffset = 0;
 
+  let buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+  let pos = 0;
+  const audioBatch: Uint8Array[] = [];
+
   try {
-    while (fileOffset < file.size) {
-      const sliceEnd = Math.min(file.size, fileOffset + chunkSize);
-      const buf = new Uint8Array(await file.slice(fileOffset, sliceEnd).arrayBuffer());
-      if (buf.length < 8) break;
+    while (fileOffset + pos < file.size) {
+      if (pos > buf.length - 65536 && fileOffset + buf.length < file.size) {
+        fileOffset += pos;
+        buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+        pos = 0;
+      }
 
-      let pos = 0;
-      const audioBatch: Uint8Array[] = [];
+      if (pos >= buf.length) break;
 
-      while (pos < buf.length - 8) {
-        const idInfo = readEbmlId(buf, pos);
-        if (!idInfo) { pos++; continue; }
+      const idInfo = readEbmlId(buf, pos);
+      if (!idInfo) {
+        if (fileOffset + buf.length >= file.size) break;
+        fileOffset += pos;
+        buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+        pos = 0;
+        continue;
+      }
 
-        const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
-        if (!sizeInfo) { pos++; continue; }
+      const sizeInfo = readEbmlVint(buf, pos + idInfo.length);
+      if (!sizeInfo) {
+        if (fileOffset + buf.length >= file.size) break;
+        fileOffset += pos;
+        buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+        pos = 0;
+        continue;
+      }
 
-        const dataStart = pos + idInfo.length + sizeInfo.length;
-        const dataEnd = dataStart + sizeInfo.value;
+      const dataStart = pos + idInfo.length + sizeInfo.length;
+      const dataEnd = dataStart + sizeInfo.value;
 
-        // Cluster element: 0x1F43B675
-        if (idInfo.id === 0x1F43B675) {
-          pos = dataStart; // Enter cluster
-          continue;
+      // 0. Segment element (0x18538067)
+      if (idInfo.id === 0x18538067) {
+        pos = dataStart;
+        continue;
+      }
+
+      // 1. Cluster element (0x1F43B675)
+      if (idInfo.id === 0x1F43B675) {
+        pos = dataStart;
+        continue;
+      }
+
+      // 2. Timecode (0xE7)
+      if (idInfo.id === 0xE7) {
+        pos = dataEnd;
+        continue;
+      }
+
+      // 3. BlockGroup (0xA0)
+      if (idInfo.id === 0xA0) {
+        pos = dataStart;
+        continue;
+      }
+
+      // 4. SimpleBlock (0xA3) or Block (0xA1)
+      if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
+        const trackVint = readEbmlVint(buf, dataStart);
+        if (trackVint && trackVint.value === targetTrackNum) {
+          const headerLen = trackVint.length + 3; // trackNum + relTimecode(2) + flags(1)
+          const payloadStart = dataStart + headerLen;
+          const payloadLen = sizeInfo.value - headerLen;
+
+          if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
+            const rawFrame = buf.slice(payloadStart, payloadStart + payloadLen);
+            audioBatch.push(rawFrame);
+          }
         }
 
-        // Timecode: 0xE7
-        if (idInfo.id === 0xE7) {
-          pos = dataEnd;
-          continue;
-        }
+        // When we accumulate 30+ frames, decode this batch
+        if (audioBatch.length >= 30) {
+          let totalBytes = 0;
+          for (const b of audioBatch) totalBytes += b.length;
+          const merged = new Uint8Array(totalBytes);
+          let mOff = 0;
+          for (const b of audioBatch) {
+            merged.set(b, mOff);
+            mOff += b.length;
+          }
+          audioBatch.length = 0;
 
-        // BlockGroup: 0xA0
-        if (idInfo.id === 0xA0) {
-          pos = dataStart; // Enter BlockGroup
-          continue;
-        }
+          const decoded = dec.decode(merged);
+          if (decoded && decoded.channelData && decoded.channelData.length > 0) {
+            detectedSampleRate = decoded.sampleRate || 48000;
+            const numChannels = decoded.channelData.length;
+            const numSamples = decoded.channelData[0].length;
 
-        // SimpleBlock (0xA3) or Block (0xA1)
-        if (idInfo.id === 0xA3 || idInfo.id === 0xA1) {
-          const trackVint = readEbmlVint(buf, dataStart);
-          if (trackVint && trackVint.value === targetTrackNum) {
-            const headerLen = trackVint.length + 3; // trackNum + relTimecode(2) + flags(1)
-            const payloadStart = dataStart + headerLen;
-            const payloadLen = sizeInfo.value - headerLen;
+            if (numSamples > 0) {
+              const leftStereo = new Float32Array(numSamples);
+              const rightStereo = new Float32Array(numSamples);
 
-            if (payloadLen > 0 && payloadStart + payloadLen <= buf.length) {
-              const rawFrame = buf.slice(payloadStart, payloadStart + payloadLen);
-              audioBatch.push(rawFrame);
+              if (numChannels >= 6) {
+                const fl = decoded.channelData[0];
+                const fr = decoded.channelData[1];
+                const fc = decoded.channelData[2]; // Centre dialogue
+                const lfe = decoded.channelData[3];
+                const bl = decoded.channelData[4];
+                const br = decoded.channelData[5];
+
+                for (let s = 0; s < numSamples; s++) {
+                  leftStereo[s] = (fl[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * bl[s]) * 1.25;
+                  rightStereo[s] = (fr[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * br[s]) * 1.25;
+                }
+              } else if (numChannels === 2) {
+                leftStereo.set(decoded.channelData[0]);
+                rightStereo.set(decoded.channelData[1]);
+              } else if (numChannels === 1) {
+                leftStereo.set(decoded.channelData[0]);
+                rightStereo.set(decoded.channelData[0]);
+              }
+
+              leftParts.push(leftStereo);
+              rightParts.push(rightStereo);
+              totalSamples += numSamples;
             }
           }
 
-          if (dataEnd > buf.length) {
-            fileOffset += dataEnd;
-            pos = 0;
-            break;
-          } else {
-            pos = dataEnd;
-            continue;
+          if (onProgress) {
+            onProgress(Math.min(95, Math.round(((fileOffset + pos) / file.size) * 100)));
           }
         }
 
-        // Skip any other element
         if (dataEnd > buf.length) {
           fileOffset += dataEnd;
+          if (fileOffset >= file.size) break;
+          buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
           pos = 0;
-          break;
+          continue;
         } else {
           pos = dataEnd;
+          continue;
         }
       }
 
-      // If audio frames were collected in this chunk, feed them to WASM decoder
-      if (audioBatch.length > 0) {
-        let totalBatchBytes = 0;
-        for (const b of audioBatch) totalBatchBytes += b.length;
-        const mergedBatch = new Uint8Array(totalBatchBytes);
-        let bOff = 0;
-        for (const b of audioBatch) {
-          mergedBatch.set(b, bOff);
-          bOff += b.length;
-        }
+      // Skip any other element
+      if (dataEnd > buf.length) {
+        fileOffset += dataEnd;
+        if (fileOffset >= file.size) break;
+        buf = await readNextSlice(file, fileOffset, CHUNK_SIZE);
+        pos = 0;
+        continue;
+      } else {
+        pos = dataEnd;
+      }
+    }
 
-        const decoded = dec.decode(mergedBatch);
-        if (decoded && decoded.channelData && decoded.channelData.length > 0) {
-          detectedSampleRate = decoded.sampleRate || 48000;
-          const numChannels = decoded.channelData.length;
-          const numSamples = decoded.channelData[0].length;
+    // Flush any remaining audio frames in batch
+    if (audioBatch.length > 0) {
+      let totalBytes = 0;
+      for (const b of audioBatch) totalBytes += b.length;
+      const merged = new Uint8Array(totalBytes);
+      let mOff = 0;
+      for (const b of audioBatch) {
+        merged.set(b, mOff);
+        mOff += b.length;
+      }
+      audioBatch.length = 0;
 
-          if (numSamples > 0) {
-            const leftStereo = new Float32Array(numSamples);
-            const rightStereo = new Float32Array(numSamples);
-
-            if (numChannels >= 6) {
-              // ITU-R BS.775 5.1-to-Stereo downmixing with dialogue boost
-              const fl = decoded.channelData[0];
-              const fr = decoded.channelData[1];
-              const fc = decoded.channelData[2]; // Centre dialogue
-              const lfe = decoded.channelData[3];
-              const bl = decoded.channelData[4];
-              const br = decoded.channelData[5];
-
-              for (let s = 0; s < numSamples; s++) {
-                leftStereo[s] = (fl[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * bl[s]) * 1.25;
-                rightStereo[s] = (fr[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * br[s]) * 1.25;
-              }
-            } else if (numChannels === 2) {
-              leftStereo.set(decoded.channelData[0]);
-              rightStereo.set(decoded.channelData[1]);
-            } else if (numChannels === 1) {
-              leftStereo.set(decoded.channelData[0]);
-              rightStereo.set(decoded.channelData[0]);
+      const decoded = dec.decode(merged);
+      if (decoded && decoded.channelData && decoded.channelData.length > 0) {
+        detectedSampleRate = decoded.sampleRate || 48000;
+        const numChannels = decoded.channelData.length;
+        const numSamples = decoded.channelData[0].length;
+        if (numSamples > 0) {
+          const leftStereo = new Float32Array(numSamples);
+          const rightStereo = new Float32Array(numSamples);
+          if (numChannels >= 6) {
+            const fl = decoded.channelData[0], fr = decoded.channelData[1], fc = decoded.channelData[2], lfe = decoded.channelData[3], bl = decoded.channelData[4], br = decoded.channelData[5];
+            for (let s = 0; s < numSamples; s++) {
+              leftStereo[s] = (fl[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * bl[s]) * 1.25;
+              rightStereo[s] = (fr[s] + 0.7071 * fc[s] + 0.5 * lfe[s] + 0.7071 * br[s]) * 1.25;
             }
-
-            leftParts.push(leftStereo);
-            rightParts.push(rightStereo);
-            totalSamples += numSamples;
+          } else {
+            leftStereo.set(decoded.channelData[0]);
+            rightStereo.set(decoded.channelData[1] || decoded.channelData[0]);
           }
+          leftParts.push(leftStereo);
+          rightParts.push(rightStereo);
+          totalSamples += numSamples;
         }
-      }
-
-      if (pos > 0) {
-        fileOffset += pos;
-      }
-
-      if (onProgress) {
-        onProgress(Math.min(95, Math.round((fileOffset / file.size) * 100)));
       }
     }
 
@@ -812,7 +894,6 @@ export async function extractAndDecodeEac3Track(
     dec.free();
   }
 
-  // Assemble complete AudioBuffer
   const audioBuffer = audioCtx.createBuffer(2, Math.max(1, totalSamples), detectedSampleRate);
   const outL = audioBuffer.getChannelData(0);
   const outR = audioBuffer.getChannelData(1);

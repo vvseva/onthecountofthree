@@ -566,5 +566,91 @@ test('EBML Multi-Track Parser: Successfully parses WEB-DL with 2x AC-3 5.1 and 3
   assert.equal(subtitleTracks[2].language, 'eng');
 });
 
+test('Subtitle Live DOM Cues Parser & Timing Offset Synchronization', () => {
+  function parseSrtOrVttToCues(rawText) {
+    const cues = [];
+    const normalized = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const blocks = normalized.split(/\n\n+/);
+
+    for (const block of blocks) {
+      const lines = block.trim().split('\n');
+      if (lines.length < 2) continue;
+
+      let timeLineIdx = -1;
+      let match = null;
+      for (let i = 0; i < lines.length; i++) {
+        const m = /(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})/.exec(lines[i]);
+        if (m) {
+          timeLineIdx = i;
+          match = m;
+          break;
+        }
+      }
+      if (timeLineIdx === -1 || !match) continue;
+
+      const startH = match[1] ? parseInt(match[1], 10) : 0;
+      const startM = parseInt(match[2], 10);
+      const startS = parseInt(match[3], 10);
+      const startMsVal = parseInt(match[4], 10);
+      const startTotalMs = (startH * 3600 + startM * 60 + startS) * 1000 + startMsVal;
+
+      const endMatch = /-->\s*(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})/.exec(lines[timeLineIdx]);
+      if (!endMatch) continue;
+      const endH = endMatch[1] ? parseInt(endMatch[1], 10) : 0;
+      const endM = parseInt(endMatch[2], 10);
+      const endS = parseInt(endMatch[3], 10);
+      const endMsVal = parseInt(endMatch[4], 10);
+      const endTotalMs = (endH * 3600 + endM * 60 + endS) * 1000 + endMsVal;
+
+      const textLines = lines.slice(timeLineIdx + 1).join('\n').trim();
+      const cleanedText = textLines.replace(/<[^>]*>/g, '').replace(/\{[^}]*\}/g, '').trim();
+      if (cleanedText) {
+        cues.push({
+          startMs: startTotalMs,
+          endMs: endTotalMs,
+          text: cleanedText
+        });
+      }
+    }
+
+    return cues.sort((a, b) => a.startMs - b.startMs);
+  }
+
+  function getActiveSubtitleText(cues, currentTimeSec, offsetSec = 0) {
+    if (!cues || cues.length === 0) return null;
+    const targetMs = (currentTimeSec - offsetSec) * 1000;
+    for (let i = 0; i < cues.length; i++) {
+      const cue = cues[i];
+      if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
+        return cue.text;
+      }
+    }
+    return null;
+  }
+
+  const srtContent = `1
+00:00:02,000 --> 00:00:05,000
+<i>Welcome to On The Count Of Three</i>
+
+2
+00:00:06,500 --> 00:00:09,200
+Sync is fully active.`;
+
+  const cues = parseSrtOrVttToCues(srtContent);
+  assert.equal(cues.length, 2);
+  assert.equal(cues[0].startMs, 2000);
+  assert.equal(cues[0].endMs, 5000);
+  assert.equal(cues[0].text, 'Welcome to On The Count Of Three');
+
+  // Exact time matches
+  assert.equal(getActiveSubtitleText(cues, 3.5), 'Welcome to On The Count Of Three');
+  assert.equal(getActiveSubtitleText(cues, 1.0), null);
+  assert.equal(getActiveSubtitleText(cues, 7.0), 'Sync is fully active.');
+
+  // Timing offset (+1.5s shift)
+  // At currentTime = 5.0s, with offset = +1.5s, effective media time = 3.5s -> cue 1
+  assert.equal(getActiveSubtitleText(cues, 5.0, 1.5), 'Welcome to On The Count Of Three');
+});
+
 
 

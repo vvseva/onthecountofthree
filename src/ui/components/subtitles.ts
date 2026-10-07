@@ -6,8 +6,8 @@
  * and synchronizes external audio tracks (.mp3, .m4a, .aac, .wav, .ogg).
  */
 
-import { demuxMatroska, extractMatroskaSubtitles, extractAndDecodeEac3Track, DemuxResult, DemuxedTrackInfo } from '../../media/mkvDemuxer';
-export type { DemuxedTrackInfo, DemuxResult };
+import { demuxMatroska, extractMatroskaSubtitles, extractAndDecodeEac3Track, DemuxResult, DemuxedTrackInfo, SubtitleCue } from '../../media/mkvDemuxer';
+export type { DemuxedTrackInfo, DemuxResult, SubtitleCue };
 
 export interface SubtitleTrackInfo {
   id: string;
@@ -33,6 +33,59 @@ export function createVttBlobUrl(text: string, isSrt = false): string {
   const vttContent = isSrt ? convertSrtToVtt(text) : (text.startsWith('WEBVTT') ? text : `WEBVTT\n\n${text}`);
   const blob = new Blob([vttContent], { type: 'text/vtt' });
   return URL.createObjectURL(blob);
+}
+
+/**
+ * Parses raw .srt or .vtt subtitle text into structured SubtitleCue objects
+ * for ultra-fast, zero-latency DOM overlay rendering.
+ */
+export function parseSrtOrVttToCues(rawText: string): SubtitleCue[] {
+  const cues: SubtitleCue[] = [];
+  const normalized = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const blocks = normalized.split(/\n\n+/);
+
+  for (const block of blocks) {
+    const lines = block.trim().split('\n');
+    if (lines.length < 2) continue;
+
+    let timeLineIdx = -1;
+    let match: RegExpExecArray | null = null;
+    for (let i = 0; i < lines.length; i++) {
+      const m = /(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})/.exec(lines[i]);
+      if (m) {
+        timeLineIdx = i;
+        match = m;
+        break;
+      }
+    }
+    if (timeLineIdx === -1 || !match) continue;
+
+    const startH = match[1] ? parseInt(match[1], 10) : 0;
+    const startM = parseInt(match[2], 10);
+    const startS = parseInt(match[3], 10);
+    const startMsVal = parseInt(match[4], 10);
+    const startTotalMs = (startH * 3600 + startM * 60 + startS) * 1000 + startMsVal;
+
+    const endMatch = /-->\s*(?:(\d{2,}):)?(\d{2}):(\d{2})[,.](\d{3})/.exec(lines[timeLineIdx]);
+    if (!endMatch) continue;
+    const endH = endMatch[1] ? parseInt(endMatch[1], 10) : 0;
+    const endM = parseInt(endMatch[2], 10);
+    const endS = parseInt(endMatch[3], 10);
+    const endMsVal = parseInt(endMatch[4], 10);
+    const endTotalMs = (endH * 3600 + endM * 60 + endS) * 1000 + endMsVal;
+
+    const textLines = lines.slice(timeLineIdx + 1).join('\n').trim();
+    const cleanedText = textLines.replace(/<[^>]*>/g, '').replace(/\{[^}]*\}/g, '').trim();
+    if (cleanedText) {
+      cues.push({
+        startMs: startTotalMs,
+        endMs: endTotalMs,
+        text: cleanedText
+      });
+    }
+  }
+
+  return cues.sort((a, b) => a.startMs - b.startMs);
 }
 
 /**
@@ -147,11 +200,26 @@ export class AudioBufferSynchronizer {
     this.video = video;
   }
 
-  public setBuffer(buffer: AudioBuffer): void {
+  public resumeAudio(): void {
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
+  }
+
+  public setBuffer(buffer: AudioBuffer, existingCtx?: AudioContext): void {
     this.cleanup();
     this.buffer = buffer;
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    this.audioCtx = new AudioCtx();
+    if (existingCtx) {
+      this.audioCtx = existingCtx;
+    } else if (!this.audioCtx) {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      this.audioCtx = new AudioCtx();
+    }
+
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
+
     this.gainNode = this.audioCtx.createGain();
     this.gainNode.gain.value = this.isMuted ? 0 : this.currentVol;
     this.gainNode.connect(this.audioCtx.destination);
@@ -234,9 +302,9 @@ export class AudioBufferSynchronizer {
     this.video.removeEventListener('seeked', this.onSeek);
     this.video.removeEventListener('ratechange', this.onRateChange);
 
-    if (this.audioCtx) {
-      this.audioCtx.close().catch(() => {});
-      this.audioCtx = null;
+    if (this.gainNode) {
+      try { this.gainNode.disconnect(); } catch {}
+      this.gainNode = null;
     }
     this.buffer = null;
     this.isSynchronizing = false;
@@ -362,6 +430,7 @@ export class SubtitleAndAudioManager {
   private video: HTMLVideoElement;
   private currentTrackEl: HTMLTrackElement | null = null;
   private currentRawText: string | null = null;
+  private currentCues: SubtitleCue[] = [];
   private isSrt = false;
   private currentOffset = 0; // seconds
   private downmixEngine: AudioDownmixEngine;
@@ -369,12 +438,28 @@ export class SubtitleAndAudioManager {
   private bufferSynchronizer: AudioBufferSynchronizer;
   private currentFile: File | null = null;
   private demuxResult: DemuxResult | null = null;
+  private sharedAudioCtx: AudioContext | null = null;
 
   constructor(video: HTMLVideoElement) {
     this.video = video;
     this.downmixEngine = new AudioDownmixEngine(video);
     this.externalAudioManager = new ExternalAudioManager(video);
     this.bufferSynchronizer = new AudioBufferSynchronizer(video);
+  }
+
+  public getSharedAudioContext(): AudioContext {
+    if (!this.sharedAudioCtx) {
+      const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      this.sharedAudioCtx = new AudioCtxClass();
+    }
+    return this.sharedAudioCtx;
+  }
+
+  public resumeAudioContext(): void {
+    if (this.sharedAudioCtx && this.sharedAudioCtx.state === 'suspended') {
+      this.sharedAudioCtx.resume().catch(() => {});
+    }
+    this.bufferSynchronizer.resumeAudio();
   }
 
   public async inspectVideoFile(file: File): Promise<DemuxResult> {
@@ -394,8 +479,9 @@ export class SubtitleAndAudioManager {
 
   public async extractAndApplyEmbeddedSubtitle(trackNumber: number): Promise<string> {
     if (!this.currentFile) throw new Error('No video file loaded');
-    const vtt = await extractMatroskaSubtitles(this.currentFile, trackNumber);
-    this.currentRawText = vtt;
+    const result = await extractMatroskaSubtitles(this.currentFile, trackNumber);
+    this.currentRawText = result.vttText;
+    this.currentCues = result.cues;
     this.isSrt = false;
     const trackInfo = this.demuxResult?.subtitleTracks.find((t) => t.trackNumber === trackNumber);
     const label = trackInfo?.name || `Subtitle ${trackNumber}`;
@@ -405,10 +491,12 @@ export class SubtitleAndAudioManager {
 
   public async decodeAndPlayEac3Audio(trackNumber: number, onProgress?: (pct: number) => void): Promise<void> {
     if (!this.currentFile) throw new Error('No video file loaded');
-    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    const tempCtx = new AudioCtx();
-    const audioBuffer = await extractAndDecodeEac3Track(this.currentFile, trackNumber, tempCtx, onProgress);
-    this.bufferSynchronizer.setBuffer(audioBuffer);
+    const ctx = this.getSharedAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {});
+    }
+    const audioBuffer = await extractAndDecodeEac3Track(this.currentFile, trackNumber, ctx, onProgress);
+    this.bufferSynchronizer.setBuffer(audioBuffer, ctx);
   }
 
   public setVolume(vol: number): void {
@@ -452,8 +540,21 @@ export class SubtitleAndAudioManager {
     const isSrtFile = file.name.toLowerCase().endsWith('.srt');
     this.isSrt = isSrtFile;
     this.currentRawText = text;
+    this.currentCues = parseSrtOrVttToCues(text);
     this.applySubtitlesWithOffset(this.currentOffset, file.name);
     return file.name;
+  }
+
+  public getActiveSubtitleText(currentTimeSec: number): string | null {
+    if (!this.currentCues || this.currentCues.length === 0) return null;
+    const targetMs = (currentTimeSec - this.currentOffset) * 1000;
+    for (let i = 0; i < this.currentCues.length; i++) {
+      const cue = this.currentCues[i];
+      if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
+        return cue.text;
+      }
+    }
+    return null;
   }
 
   public setSubtitleOffset(seconds: number): void {
@@ -526,6 +627,8 @@ export class SubtitleAndAudioManager {
   }
 
   public disableSubtitles(): void {
+    this.currentCues = [];
+    this.currentRawText = null;
     if (this.currentTrackEl) {
       this.currentTrackEl.remove();
       this.currentTrackEl = null;
