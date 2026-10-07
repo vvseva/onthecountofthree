@@ -651,6 +651,30 @@ Sync is fully active.`;
   // At currentTime = 5.0s, with offset = +1.5s, effective media time = 3.5s -> cue 1
   assert.equal(getActiveSubtitleText(cues, 5.0, 1.5), 'Welcome to On The Count Of Three');
 });
+test('Secret Chat Command: /polina triggers full screen message and hearts', () => {
+  let overlayTriggered = 0;
+  const fakeOverlay = {
+    show: () => { overlayTriggered++; }
+  };
 
+  function processChatMessage(text) {
+    const textClean = text.trim().toLowerCase();
+    if (textClean === '/polina' || textClean.startsWith('/polina ') || textClean.startsWith('/polina!')) {
+      fakeOverlay.show();
+      return true;
+    }
+    return false;
+  }
 
+  assert.equal(processChatMessage('/polina'), true);
+  assert.equal(overlayTriggered, 1);
 
+  assert.equal(processChatMessage('  /POLINA  '), true);
+  assert.equal(overlayTriggered, 2);
+
+  assert.equal(processChatMessage('/polina!'), true);
+  assert.equal(overlayTriggered, 3);
+
+  assert.equal(processChatMessage('hello world'), false);
+  assert.equal(overlayTriggered, 3);
+});

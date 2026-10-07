@@ -8,6 +8,7 @@ import { ChatMessagePayload } from '../../types';
 export interface ChatWindowCallbacks {
   onSendMessage: (text: string) => void;
   onVisibilityChange: (isVisible: boolean) => void;
+  onSecretCommand?: (cmd: string) => void;
 }
 
 export class ChatWindowComponent {
@@ -131,13 +132,35 @@ export class ChatWindowComponent {
 
     const senderDisplay = isSelf ? 'You' : `Peer ${msg.senderId.slice(0, 4)}`;
 
+    const isPolina = msg.text.trim().toLowerCase() === '/polina';
+    let textHtml = this.escapeHtml(msg.text);
+    if (isPolina) {
+      textHtml = `
+        <div class="chat-polina-box" style="padding: 6px 8px; background: rgba(255, 75, 114, 0.15); border: 1px solid #ff758c; border-radius: 4px; margin-top: 2px;">
+          <span style="color: #ff2255; font-weight: bold; font-size: 12px;">💖 Полина, ты мне очень нравишься! 💖</span><br>
+          <button class="retro-btn small chat-polina-reopen-btn" style="margin-top: 5px; font-size: 11px; cursor: pointer; padding: 2px 8px;">❤️ Показать на весь экран</button>
+        </div>
+      `;
+    }
+
     msgEl.innerHTML = `
       <div class="chat-msg-header">
         <span class="chat-sender ${isSelf ? 'self' : 'peer'}">${senderDisplay}</span>
         <span class="chat-time">${timeStr}</span>
       </div>
-      <div class="chat-msg-text">${this.escapeHtml(msg.text)}</div>
+      <div class="chat-msg-text">${textHtml}</div>
     `;
+
+    if (isPolina) {
+      const reopenBtn = msgEl.querySelector('.chat-polina-reopen-btn');
+      if (reopenBtn) {
+        reopenBtn.addEventListener('click', () => {
+          if (this.callbacks.onSecretCommand) {
+            this.callbacks.onSecretCommand('polina');
+          }
+        });
+      }
+    }
 
     this.messagesList.appendChild(msgEl);
     this.messagesList.scrollTop = this.messagesList.scrollHeight;

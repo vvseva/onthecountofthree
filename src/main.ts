@@ -25,6 +25,7 @@ import { OffsetSliderComponent } from './ui/components/offsetSlider';
 import { DiagnosticsComponent } from './ui/components/diagnostics';
 import { ToastNotificationManager } from './ui/components/toastNotification';
 import { ChatWindowComponent } from './ui/components/chatWindow';
+import { SecretHeartOverlay } from './ui/components/secretHeartOverlay';
 import { openInfoModal } from './ui/components/shareModal';
 import { openPairingModal } from './ui/components/pairingModal';
 import { PeerState } from './types';
@@ -71,6 +72,9 @@ async function bootstrapApp() {
 
   let chatCol: HTMLElement;
 
+  // Secret Hearts Overlay for /polina command
+  const polinaOverlay = new SecretHeartOverlay();
+
   const chatWindow = new ChatWindowComponent({
     onSendMessage: (text) => {
       syncEngine.sendChatMessage(text);
@@ -81,6 +85,11 @@ async function bootstrapApp() {
         if (chatCol) chatCol.style.display = 'block';
       } else {
         if (chatCol) chatCol.style.display = 'none';
+      }
+    },
+    onSecretCommand: (cmd) => {
+      if (cmd === 'polina') {
+        polinaOverlay.show();
       }
     }
   });
@@ -197,6 +206,10 @@ async function bootstrapApp() {
       chatWindow.addMessage(msg, isSelf);
       if (!isSelf) {
         announcer.announce(`New message from peer: ${msg.text}`);
+      }
+      const textClean = msg.text.trim().toLowerCase();
+      if (textClean === '/polina' || textClean.startsWith('/polina ') || textClean.startsWith('/polina!')) {
+        polinaOverlay.show();
       }
     },
     onPauseWithDetails: (pausedBy, timeSec) => {
