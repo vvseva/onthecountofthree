@@ -9,6 +9,8 @@ import { NostrIdentity, signEphemeralSyncEvent } from '../network/nostrIdentity'
 import { encryptPayload, decryptPayload } from '../crypto/e2ee';
 import { VerifiedEvent } from 'nostr-tools';
 
+export const PEER_TIMEOUT_MS = 60000;
+
 export interface SyncEngineCallbacks {
   onPeerUpdate: (peer: PeerState | null) => void;
   onFingerprintStatusChange: (status: FingerprintMatchStatus, peerFingerprint?: string) => void;
@@ -513,9 +515,9 @@ export class SyncEngine {
   public performDriftCorrection(): void {
     if (!this.video || !this.activePeer) return;
 
-    // Check if peer has timed out (> 15 seconds without message)
+    // Check if peer has timed out (> 60 seconds without message)
     const timeSincePeerSeen = Date.now() - this.activePeer.lastSeen;
-    if (timeSincePeerSeen > 15000) {
+    if (timeSincePeerSeen > PEER_TIMEOUT_MS) {
       this.activePeer = null;
       this.callbacks.onPeerUpdate(null);
       this.updateFingerprintStatus();

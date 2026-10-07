@@ -28,6 +28,7 @@ import { ChatWindowComponent } from './ui/components/chatWindow';
 import { SecretHeartOverlay } from './ui/components/secretHeartOverlay';
 import { openInfoModal } from './ui/components/shareModal';
 import { openPairingModal } from './ui/components/pairingModal';
+import { applyRoomTheme } from './ui/theme';
 import { PeerState } from './types';
 
 function formatTime(sec: number): string {
@@ -50,6 +51,7 @@ async function bootstrapApp() {
   const isHost = !hashCredentials;
   let credentials: RoomCredentials = hashCredentials || (await generateRoomCredentials());
   setUrlHash(credentials.roomId, credentials.keyBase64);
+  applyRoomTheme(credentials.roomId);
 
   // 3. Ephemeral Nostr Identity (in-memory throwaway keypair)
   const nostrIdentity = createEphemeralIdentity();
@@ -113,6 +115,7 @@ async function bootstrapApp() {
     onNewRoom: async () => {
       credentials = await generateRoomCredentials();
       setUrlHash(credentials.roomId, credentials.keyBase64);
+      applyRoomTheme(credentials.roomId);
       roomBar.updateCredentials(credentials.roomId, credentials.keyBase64);
       syncEngine.setIsHost(true);
       syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
@@ -334,6 +337,7 @@ async function bootstrapApp() {
     const newCreds = await parseCredentialsFromHash();
     if (newCreds && newCreds.roomId !== credentials.roomId) {
       credentials = newCreds;
+      applyRoomTheme(credentials.roomId);
       roomBar.updateCredentials(credentials.roomId, credentials.keyBase64);
       syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
       diagnostics.appendLog(`[Room] Switched to room from hash URL: ${credentials.roomId}`);

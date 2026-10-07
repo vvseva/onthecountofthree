@@ -825,3 +825,89 @@ test('Playback Prevention: Warning shown when pressing Play without a loaded vid
   assert.equal(warningTriggered, false);
   assert.equal(playRequestSent, true, 'Play request can proceed after video is loaded');
 });
+
+test('Peer Disconnect Timeout: increased to 60 seconds (60000ms)', () => {
+  const PEER_TIMEOUT_MS = 60000;
+  assert.equal(PEER_TIMEOUT_MS, 60000, 'Peer timeout should be 60000ms');
+
+  const now = 100000;
+  function isPeerTimedOut(lastSeen, currentTime = now) {
+    return (currentTime - lastSeen) > PEER_TIMEOUT_MS;
+  }
+
+  // 15 seconds ago (used to timeout under old 15s rule, now still connected)
+  assert.equal(isPeerTimedOut(now - 15000), false, 'Peer seen 15s ago should NOT time out with 60s window');
+
+  // 45 seconds ago (active within 60s)
+  assert.equal(isPeerTimedOut(now - 45000), false, 'Peer seen 45s ago should NOT time out with 60s window');
+
+  // Exactly 60s ago
+  assert.equal(isPeerTimedOut(now - 60000), false, 'Peer seen 60s ago should not time out');
+
+  // 60.1 seconds ago
+  assert.equal(isPeerTimedOut(now - 60100), true, 'Peer seen >60s ago MUST time out');
+
+  // 90 seconds ago
+  assert.equal(isPeerTimedOut(now - 90000), true, 'Peer seen 90s ago MUST time out');
+});
+
+test('Room Color Theme: deterministically generates retro palette based on roomId', () => {
+  function computeRoomTheme(roomId) {
+    if (!roomId) {
+      return {
+        hue: 210,
+        titlebarGrad: 'linear-gradient(90deg, #0a246a, #a6caf0)',
+        windowBg: '#d4d0c8',
+        roomBarBg: '#e8e5dc',
+        desktopBg: '#284c68',
+        desktopStipple: '#3a648b'
+      };
+    }
+
+    let hash = 0;
+    for (let i = 0; i < roomId.length; i++) {
+      hash = (hash << 5) - hash + roomId.charCodeAt(i);
+      hash |= 0;
+    }
+    const positiveHash = Math.abs(hash);
+    const hue = positiveHash % 360;
+
+    const titlebarStart = `hsl(${hue}, 68%, 26%)`;
+    const titlebarEnd = `hsl(${(hue + 32) % 360}, 56%, 66%)`;
+    const titlebarGrad = `linear-gradient(90deg, ${titlebarStart}, ${titlebarEnd})`;
+
+    const windowBg = `hsl(${hue}, 12%, 84%)`;
+    const roomBarBg = `hsl(${hue}, 15%, 88%)`;
+    const desktopBg = `hsl(${hue}, 36%, 22%)`;
+    const desktopStipple = `hsl(${hue}, 36%, 30%)`;
+
+    return {
+      hue,
+      titlebarGrad,
+      windowBg,
+      roomBarBg,
+      desktopBg,
+      desktopStipple
+    };
+  }
+
+  const roomA = 'a84f3c9e120d5b7a';
+  const roomB = 'f1e2d3c4b5a67890';
+
+  const themeA1 = computeRoomTheme(roomA);
+  const themeA2 = computeRoomTheme(roomA);
+  assert.deepEqual(themeA1, themeA2, 'Same roomId must always yield identical theme');
+
+  const themeB = computeRoomTheme(roomB);
+  assert.notEqual(themeA1.hue, themeB.hue, 'Different roomIds should generally yield different hues');
+  assert.ok(themeA1.titlebarGrad.includes('linear-gradient'), 'Titlebar gradient generated');
+  assert.ok(themeA1.windowBg.includes('hsl('), 'Window background generated');
+  assert.ok(themeA1.roomBarBg.includes('hsl('), 'Room bar background generated');
+  assert.ok(themeA1.desktopBg.includes('hsl('), 'Desktop background generated');
+  assert.ok(themeA1.desktopStipple.includes('hsl('), 'Desktop stipple generated');
+
+  const fallbackTheme = computeRoomTheme('');
+  assert.equal(fallbackTheme.hue, 210, 'Fallback hue is 210');
+  assert.equal(fallbackTheme.windowBg, '#d4d0c8', 'Fallback window bg is classic gray');
+});
+

@@ -5,7 +5,9 @@
 
 :root {
   --bg-desktop: #284c68;
+  --desktop-stipple: #3a648b;
   --bg-window: #d4d0c8;
+  --bg-room-bar: #e8e5dc;
   --bg-titlebar: linear-gradient(90deg, #0a246a, #a6caf0);
   --bg-titlebar-text: #ffffff;
   --bg-inset: #ffffff;
@@ -32,7 +34,7 @@ html, body {
   height: 100%;
   background-color: var(--bg-desktop);
   /* Classic retro desktop stipple pattern */
-  background-image: radial-gradient(#3a648b 1px, transparent 1px);
+  background-image: radial-gradient(var(--desktop-stipple, #3a648b) 1px, transparent 1px);
   background-size: 8px 8px;
   font-family: var(--font-system);
   font-size: 13px;
@@ -241,7 +243,7 @@ html, body {
   justify-content: space-between;
   gap: 8px;
   padding: 8px;
-  background: #e8e5dc;
+  background: var(--bg-room-bar, #e8e5dc);
   border: 1px solid #999999;
   margin-bottom: 12px;
 }
