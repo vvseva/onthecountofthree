@@ -548,12 +548,34 @@ export class SubtitleAndAudioManager {
   public getActiveSubtitleText(currentTimeSec: number): string | null {
     if (!this.currentCues || this.currentCues.length === 0) return null;
     const targetMs = (currentTimeSec - this.currentOffset) * 1000;
-    for (let i = 0; i < this.currentCues.length; i++) {
-      const cue = this.currentCues[i];
+    const cues = this.currentCues;
+
+    // O(log N) binary search for subtitle cue matching targetMs
+    let low = 0;
+    let high = cues.length - 1;
+    let matchIdx = -1;
+
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const cue = cues[mid];
+      if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
+        return cue.text;
+      }
+      if (targetMs < cue.startMs) {
+        high = mid - 1;
+      } else {
+        matchIdx = mid;
+        low = mid + 1;
+      }
+    }
+
+    if (matchIdx >= 0) {
+      const cue = cues[matchIdx];
       if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
         return cue.text;
       }
     }
+
     return null;
   }
 

@@ -40,13 +40,34 @@ export function openInfoModal(roomUrl: string, onClose: () => void): HTMLElement
     </div>
   `;
 
+  const previousActiveElement = document.activeElement as HTMLElement | null;
+
   const close = () => {
+    document.removeEventListener('keydown', onKeyDown);
     backdrop.remove();
+    if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+      previousActiveElement.focus();
+    }
     onClose();
   };
 
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      close();
+    }
+  };
+
+  document.addEventListener('keydown', onKeyDown);
   backdrop.querySelector('#btn-close-modal')!.addEventListener('click', close);
   backdrop.querySelector('#btn-modal-close-action')!.addEventListener('click', close);
+
+  // Close when clicking outside dialog
+  backdrop.addEventListener('click', (e) => {
+    if (e.target === backdrop) {
+      close();
+    }
+  });
 
   const copyBtn = backdrop.querySelector('#btn-modal-copy') as HTMLButtonElement;
   copyBtn.addEventListener('click', async () => {
@@ -64,5 +85,6 @@ export function openInfoModal(roomUrl: string, onClose: () => void): HTMLElement
   });
 
   document.body.appendChild(backdrop);
+  copyBtn.focus();
   return backdrop;
 }

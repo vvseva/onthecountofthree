@@ -7,6 +7,15 @@ export default defineConfig({
     host: true
   },
   build: {
-    target: 'esnext'
+    target: 'esnext',
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-nostr': ['nostr-tools'],
+          'vendor-audio': ['@audio/decode-eac3']
+        }
+      }
+    }
   }
 });

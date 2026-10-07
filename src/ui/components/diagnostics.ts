@@ -4,6 +4,7 @@
  */
 
 import { RelayStatus } from '../../types';
+import { formatPlaybackTime } from '../../utils/format';
 
 export interface DiagnosticsCallbacks {
   onAddRelay: (url: string) => void;
@@ -152,11 +153,19 @@ export class DiagnosticsComponent {
   }
 
   private setupEvents(): void {
-    this.toggleBtn.addEventListener('click', () => {
+    const toggleAction = () => {
       this.isExpanded = !this.isExpanded;
       this.contentContainer.style.display = this.isExpanded ? 'block' : 'none';
       this.element.querySelector('#accordion-icon')!.textContent = this.isExpanded ? '▲ Hide' : '▼ Show';
       this.toggleBtn.setAttribute('aria-expanded', this.isExpanded.toString());
+    };
+
+    this.toggleBtn.addEventListener('click', toggleAction);
+    this.toggleBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleAction();
+      }
     });
 
     const addBtn = this.element.querySelector('#btn-add-relay')!;
@@ -207,7 +216,7 @@ export class DiagnosticsComponent {
       this.rateValEl.textContent = `${stats.currentRate.toFixed(2)}x`;
     }
 
-    this.peerTimeValEl.textContent = this.formatTime(stats.peerTimeSec);
+    this.peerTimeValEl.textContent = formatPlaybackTime(stats.peerTimeSec);
   }
 
   public updateRelayTable(relays: RelayStatus[]): void {
@@ -256,12 +265,5 @@ export class DiagnosticsComponent {
     while (this.logConsole.childElementCount > 300) {
       this.logConsole.removeChild(this.logConsole.firstElementChild!);
     }
-  }
-
-  private formatTime(sec: number): string {
-    if (isNaN(sec) || sec < 0) return '00:00';
-    const mins = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   }
 }

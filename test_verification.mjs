@@ -911,3 +911,86 @@ test('Room Color Theme: deterministically generates retro palette based on roomI
   assert.equal(fallbackTheme.windowBg, '#d4d0c8', 'Fallback window bg is classic gray');
 });
 
+test('Unified Time Formatter: correctly formats short clips, multi-hour media, and invalid inputs', () => {
+  function formatPlaybackTime(seconds, forceHours = false) {
+    if (isNaN(seconds) || seconds < 0) seconds = 0;
+    const totalSec = Math.floor(seconds);
+    const hours = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+
+    if (hours > 0 || forceHours) {
+      return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+
+  assert.equal(formatPlaybackTime(0), '00:00');
+  assert.equal(formatPlaybackTime(-10), '00:00');
+  assert.equal(formatPlaybackTime(NaN), '00:00');
+  assert.equal(formatPlaybackTime(65), '01:05');
+  assert.equal(formatPlaybackTime(599), '09:59');
+  assert.equal(formatPlaybackTime(3600), '01:00:00');
+  assert.equal(formatPlaybackTime(5412), '01:30:12');
+  assert.equal(formatPlaybackTime(36000), '10:00:00');
+  assert.equal(formatPlaybackTime(45, true), '00:00:45');
+});
+
+test('Subtitle Binary Search: accurately retrieves cues in O(log N) and handles gaps', () => {
+  function getActiveSubtitleText(cues, currentTimeSec, currentOffset = 0) {
+    if (!cues || cues.length === 0) return null;
+    const targetMs = (currentTimeSec - currentOffset) * 1000;
+
+    let low = 0;
+    let high = cues.length - 1;
+    let matchIdx = -1;
+
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const cue = cues[mid];
+      if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
+        return cue.text;
+      }
+      if (targetMs < cue.startMs) {
+        high = mid - 1;
+      } else {
+        matchIdx = mid;
+        low = mid + 1;
+      }
+    }
+
+    if (matchIdx >= 0) {
+      const cue = cues[matchIdx];
+      if (targetMs >= cue.startMs && targetMs <= cue.endMs) {
+        return cue.text;
+      }
+    }
+
+    return null;
+  }
+
+  const sampleCues = [
+    { startMs: 1000, endMs: 3000, text: 'Hello, world!' },
+    { startMs: 4000, endMs: 6500, text: 'This is onthecountofthree.' },
+    { startMs: 7000, endMs: 9000, text: 'Synchronized cinema.' }
+  ];
+
+  // Within first cue
+  assert.equal(getActiveSubtitleText(sampleCues, 1.5), 'Hello, world!');
+  assert.equal(getActiveSubtitleText(sampleCues, 1.0), 'Hello, world!');
+  assert.equal(getActiveSubtitleText(sampleCues, 3.0), 'Hello, world!');
+
+  // In gap between cues
+  assert.equal(getActiveSubtitleText(sampleCues, 3.5), null);
+
+  // In second cue
+  assert.equal(getActiveSubtitleText(sampleCues, 5.0), 'This is onthecountofthree.');
+
+  // In third cue with +1.0s offset
+  assert.equal(getActiveSubtitleText(sampleCues, 8.5, 0.5), 'Synchronized cinema.');
+
+  // Past all cues
+  assert.equal(getActiveSubtitleText(sampleCues, 15.0), null);
+});
+

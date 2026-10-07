@@ -8,6 +8,7 @@
 
 import { computeVideoFingerprint, extractVideoDuration, FingerprintResult } from '../../fingerprint/hasher';
 import { SubtitleAndAudioManager, DemuxResult } from './subtitles';
+import { formatPlaybackTime } from '../../utils/format';
 
 export interface VideoPlayerCallbacks {
   onFingerprintComputed: (res: FingerprintResult) => void;
@@ -290,6 +291,11 @@ export class VideoPlayerComponent {
       this.hideDecodingAlertPopup();
       this.callbacks.onUserPlayRequest(this.isInstantPlayEnabled());
     });
+    this.decodingAlertOverlay.addEventListener('click', (e) => {
+      if (e.target === this.decodingAlertOverlay) {
+        this.hideDecodingAlertPopup();
+      }
+    });
 
     // Subtitles & Audio
     this.subtitleManager = new SubtitleAndAudioManager(this.video);
@@ -301,6 +307,7 @@ export class VideoPlayerComponent {
     this.eac3StatusPill = this.element.querySelector('#eac3-status-pill')!;
     this.instantPlayCheckbox = this.element.querySelector('#chk-instant-play')!;
 
+    this.restorePreferences();
     this.setupEvents();
     this.setupFullscreenAutoHiding();
   }
@@ -375,9 +382,17 @@ export class VideoPlayerComponent {
       }
     });
 
+    this.subOffsetSlider.setAttribute('role', 'slider');
+    this.subOffsetSlider.setAttribute('aria-valuemin', '-5.0');
+    this.subOffsetSlider.setAttribute('aria-valuemax', '5.0');
+    this.subOffsetSlider.setAttribute('aria-valuenow', '0.0');
+    this.subOffsetSlider.setAttribute('aria-valuetext', '0.0s');
+
     this.subOffsetSlider.addEventListener('input', () => {
       const off = parseFloat(this.subOffsetSlider.value);
       this.subOffsetReadout.textContent = `${off > 0 ? '+' : ''}${off.toFixed(1)}s`;
+      this.subOffsetSlider.setAttribute('aria-valuenow', off.toFixed(1));
+      this.subOffsetSlider.setAttribute('aria-valuetext', `${off > 0 ? '+' : ''}${off.toFixed(1)} seconds`);
       this.subtitleManager.setSubtitleOffset(off);
     });
 
@@ -558,8 +573,19 @@ export class VideoPlayerComponent {
     this.volumeSlider.addEventListener('input', () => {
       this.userVolume = parseFloat(this.volumeSlider.value);
       this.userMuted = false;
+      try {
+        localStorage.setItem('onthecount_volume', this.userVolume.toString());
+        localStorage.setItem('onthecount_muted', '0');
+      } catch {}
       this.applyVolumeAndMute();
+      this.updateVolumeAria();
       this.callbacks.onAnnounce(`Volume ${Math.round(this.userVolume * 100)} percent`);
+    });
+
+    this.instantPlayCheckbox.addEventListener('change', () => {
+      try {
+        localStorage.setItem('onthecount_instant', this.instantPlayCheckbox.checked ? '1' : '0');
+      } catch {}
     });
 
     this.muteBtn.addEventListener('click', () => {
@@ -1101,14 +1127,52 @@ export class VideoPlayerComponent {
     this.userVolume = newVol;
     this.userMuted = false;
     this.volumeSlider.value = newVol.toString();
+    try {
+      localStorage.setItem('onthecount_volume', newVol.toString());
+      localStorage.setItem('onthecount_muted', '0');
+    } catch {}
     this.applyVolumeAndMute();
+    this.updateVolumeAria();
     this.callbacks.onAnnounce(`Volume ${Math.round(newVol * 100)} percent`);
   }
 
   public toggleMute(): void {
     this.userMuted = !this.userMuted;
+    try {
+      localStorage.setItem('onthecount_muted', this.userMuted ? '1' : '0');
+    } catch {}
     this.applyVolumeAndMute();
+    this.updateVolumeAria();
     this.callbacks.onAnnounce(this.userMuted ? 'Muted' : 'Unmuted');
+  }
+
+  private restorePreferences(): void {
+    try {
+      const savedVol = localStorage.getItem('onthecount_volume');
+      if (savedVol !== null) {
+        const v = parseFloat(savedVol);
+        if (!isNaN(v) && v >= 0 && v <= 1) {
+          this.userVolume = v;
+          this.volumeSlider.value = v.toString();
+        }
+      }
+      const savedMuted = localStorage.getItem('onthecount_muted');
+      if (savedMuted === '1') {
+        this.userMuted = true;
+      }
+      const savedInstant = localStorage.getItem('onthecount_instant');
+      if (savedInstant === '1') {
+        this.instantPlayCheckbox.checked = true;
+      }
+    } catch {}
+    this.applyVolumeAndMute();
+    this.updateVolumeAria();
+  }
+
+  private updateVolumeAria(): void {
+    const pct = this.userMuted ? 0 : Math.round(this.userVolume * 100);
+    this.volumeSlider.setAttribute('aria-valuenow', pct.toString());
+    this.volumeSlider.setAttribute('aria-valuetext', `${pct}%`);
   }
 
   private applyVolumeAndMute(): void {
@@ -1161,20 +1225,11 @@ export class VideoPlayerComponent {
   }
 
   private updateTimeDisplay(current: number, duration: number): void {
-    const curStr = this.formatTime(current);
-    const durStr = this.formatTime(duration);
+    const curStr = formatPlaybackTime(current, duration >= 3600);
+    const durStr = formatPlaybackTime(duration, duration >= 3600);
     this.timeDisplay.textContent = `${curStr} / ${durStr}`;
-  }
-
-  private formatTime(sec: number): string {
-    if (isNaN(sec) || sec < 0) sec = 0;
-    const hours = Math.floor(sec / 3600);
-    const mins = Math.floor((sec % 3600) / 60);
-    const secs = Math.floor(sec % 60);
-
-    if (hours > 0) {
-      return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-    }
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    const pct = duration > 0 ? (current / duration) * 100 : 0;
+    this.scrubber.setAttribute('aria-valuenow', pct.toFixed(1));
+    this.scrubber.setAttribute('aria-valuetext', `${curStr} of ${durStr}`);
   }
 }

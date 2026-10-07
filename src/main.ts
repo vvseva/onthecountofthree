@@ -28,15 +28,10 @@ import { ChatWindowComponent } from './ui/components/chatWindow';
 import { SecretHeartOverlay } from './ui/components/secretHeartOverlay';
 import { openInfoModal } from './ui/components/shareModal';
 import { openPairingModal } from './ui/components/pairingModal';
+import { openHelpModal } from './ui/components/helpModal';
 import { applyRoomTheme } from './ui/theme';
+import { formatPlaybackTime } from './utils/format';
 import { PeerState } from './types';
-
-function formatTime(sec: number): string {
-  if (isNaN(sec) || sec < 0) sec = 0;
-  const mins = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-}
 
 async function bootstrapApp() {
   const root = document.getElementById('app');
@@ -229,6 +224,16 @@ async function bootstrapApp() {
       chatWindow.addMessage(msg, isSelf);
       if (!isSelf) {
         announcer.announce(`New message from peer: ${msg.text}`);
+        const isFs = !!(document.fullscreenElement || (document as unknown as { webkitFullscreenElement?: Element }).webkitFullscreenElement);
+        if (isFs || !chatWindow.getIsOpen()) {
+          toastManager.show({
+            title: `Chat from Peer ${msg.senderId.slice(0, 4)}`,
+            message: msg.text.slice(0, 80),
+            icon: '💬',
+            type: 'info',
+            durationMs: 3500
+          });
+        }
       }
       const textClean = msg.text.trim().toLowerCase();
       if (textClean === '/polina' || textClean.startsWith('/polina ') || textClean.startsWith('/polina!')) {
@@ -236,7 +241,7 @@ async function bootstrapApp() {
       }
     },
     onPauseWithDetails: (pausedBy, timeSec) => {
-      const bannerMsg = `Paused by ${pausedBy === 'You' ? 'You' : `Peer ${pausedBy.slice(0, 4)}`} at ${formatTime(timeSec)}`;
+      const bannerMsg = `Paused by ${pausedBy === 'You' ? 'You' : `Peer ${pausedBy.slice(0, 4)}`} at ${formatPlaybackTime(timeSec)}`;
       videoPlayer.showPauseBanner(bannerMsg);
     },
     onRoleChange: (role, triggeredByPeer) => {
@@ -329,7 +334,20 @@ async function bootstrapApp() {
     onSeekRelative: (sec) => videoPlayer.seekRelative(sec),
     onVolumeChange: (delta) => videoPlayer.adjustVolume(delta),
     onToggleFullscreen: () => videoPlayer.toggleFullscreen(),
-    onToggleMute: () => videoPlayer.toggleMute()
+    onToggleMute: () => videoPlayer.toggleMute(),
+    onToggleControls: () => videoPlayer.toggleControlsVisibility(),
+    onFocusChat: () => {
+      chatWindow.show();
+      announcer.announce('Focused chat input');
+    },
+    onToggleHelp: () => {
+      const existing = document.querySelector('.modal-backdrop');
+      if (existing) {
+        existing.remove();
+      } else {
+        openHelpModal();
+      }
+    }
   });
 
   // Listen for hash changes in case user pastes another link into address bar
