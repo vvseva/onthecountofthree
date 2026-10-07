@@ -83,3 +83,16 @@ npm test
 # Build production bundle
 npm run build
 ```
+
+---
+
+## 4. Deployment to GitHub Pages
+
+This repository is pre-configured for automated deployment to GitHub Pages using GitHub Actions:
+
+1. In your GitHub repository, navigate to **Settings** > **Pages**.
+2. Under **Build and deployment** → **Source**, select **GitHub Actions**.
+3. Push changes to the `main` branch (or run the workflow manually under the **Actions** tab via "Run workflow").
+4. GitHub Actions will test the suite, build the static bundle into `./dist`, and publish it to `https://<username>.github.io/onthecountofthree/`.
+
+> Assets and routes use relative paths (`base: './'`), and the cryptographic key stays in the URL hash fragment (`#room=...&key=...`), ensuring that all files, styles, and zero-backend E2EE transports operate seamlessly on GitHub Pages.
