@@ -1,0 +1,46 @@
+export type SyncEventType =
+  | 'PLAY'
+  | 'PAUSE'
+  | 'SEEK'
+  | 'PING'
+  | 'PONG'
+  | 'ANNOUNCE';
+
+export interface SyncPayload {
+  version: 1;
+  senderId: string;       // 8-character unique session token for this client
+  sequenceId: number;     // Monotonically increasing sequence number
+  timestamp: number;      // Sender Date.now()
+  type: SyncEventType;
+  playbackTime: number;   // Video currentTime in seconds
+  playbackRate: number;   // Video playbackRate
+  paused: boolean;        // Whether the video is currently paused
+  fingerprint?: string;   // 8-character file fingerprint (e.g., A7C2-9F10)
+  duration?: number;      // Video total duration in seconds
+  pingNonce?: string;     // Token echoed in PONG
+  echoTimestamp?: number; // Original ping timestamp returned in PONG
+}
+
+export type RelayConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR';
+
+export interface RelayStatus {
+  url: string;
+  status: RelayConnectionStatus;
+  eventsSent: number;
+  eventsReceived: number;
+  latencyMs?: number;
+  lastError?: string;
+}
+
+export interface PeerState {
+  peerId: string;
+  lastSeen: number;
+  fingerprint?: string;
+  playbackTime: number;
+  paused: boolean;
+  playbackRate: number;
+  rttMs: number;
+  estimatedClockSkewMs: number;
+}
+
+export type FingerprintMatchStatus = 'NO_LOCAL_FILE' | 'WAITING_FOR_PEER' | 'VERIFIED' | 'MISMATCH';
