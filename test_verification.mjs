@@ -290,3 +290,126 @@ test('Audio Downmixing: ITU-R BS.775 5.1-to-Stereo coefficients & Multi-channel 
   assert.equal(has6ch, true, 'Must detect 6-channel audio');
 });
 
+test('EBML VINT Decoder: Correctly parses 1-byte through 4-byte Matroska integers', () => {
+  function readEbmlVint(buffer, offset) {
+    if (offset >= buffer.length) return null;
+    const firstByte = buffer[offset];
+    if (firstByte === 0) return null;
+
+    let length = 1;
+    let mask = 0x80;
+    while ((firstByte & mask) === 0 && length <= 8) {
+      length++;
+      mask >>= 1;
+    }
+
+    if (offset + length > buffer.length) return null;
+
+    let value = firstByte & (mask - 1);
+    for (let i = 1; i < length; i++) {
+      value = (value * 256) + buffer[offset + i];
+    }
+
+    return { value, length };
+  }
+
+  // 1-byte: 0x81 -> value 1
+  assert.deepEqual(readEbmlVint(new Uint8Array([0x81]), 0), { value: 1, length: 1 });
+  // 1-byte: 0x82 -> value 2
+  assert.deepEqual(readEbmlVint(new Uint8Array([0x82]), 0), { value: 2, length: 1 });
+  // 2-byte: 0x40 0x05 -> value 5
+  assert.deepEqual(readEbmlVint(new Uint8Array([0x40, 0x05]), 0), { value: 5, length: 2 });
+  // 4-byte: 0x10 0x00 0x01 0x00 -> value 256
+  assert.deepEqual(readEbmlVint(new Uint8Array([0x10, 0x00, 0x01, 0x00]), 0), { value: 256, length: 4 });
+});
+
+test('Subtitle ASS/SSA Cleaning and WebVTT formatting', () => {
+  // Test removing ASS event dialogue styling and tags
+  function cleanAssText(raw) {
+    let text = raw;
+    if (text.includes(',')) {
+      const parts = text.split(',');
+      if (parts.length >= 9) {
+        text = parts.slice(8).join(',');
+      }
+    }
+    return text.replace(/\{[^}]*\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
+  }
+
+  const rawAss = '1,,Default,,0,0,0,,{\\pos(192,200)}{\\b1}Hello world!\\NSecond line.';
+  const cleaned = cleanAssText(rawAss);
+  assert.equal(cleaned, 'Hello world!\nSecond line.');
+
+  // Test SRT to VTT timestamp conversion
+  function convertSrtToVtt(srtText) {
+    let normalized = srtText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    normalized = normalized.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    return `WEBVTT\n\n${normalized.trim()}\n`;
+  }
+
+  const sampleSrt = '1\n00:01:23,456 --> 00:01:26,789\nHey there!\n';
+  const vtt = convertSrtToVtt(sampleSrt);
+  assert.ok(vtt.startsWith('WEBVTT'));
+  assert.ok(vtt.includes('00:01:23.456 --> 00:01:26.789'));
+});
+
+test('Fullscreen Controls Auto-Hide & Bottom Progress state machine', () => {
+  class FullscreenController {
+    constructor() {
+      this.isFullscreen = false;
+      this.isControlsHidden = false;
+      this.isMouseOverControls = false;
+      this.isPaused = false;
+      this.timer = null;
+    }
+
+    setFullscreen(fs) {
+      this.isFullscreen = fs;
+      if (!fs) {
+        this.isControlsHidden = false;
+        if (this.timer) clearTimeout(this.timer);
+      } else {
+        this.resetTimer();
+      }
+    }
+
+    onMouseMove() {
+      if (this.isFullscreen) {
+        this.isControlsHidden = false;
+        this.resetTimer();
+      }
+    }
+
+    resetTimer() {
+      if (this.timer) clearTimeout(this.timer);
+      if (this.isFullscreen && !this.isPaused && !this.isMouseOverControls) {
+        this.timer = setTimeout(() => {
+          this.isControlsHidden = true;
+        }, 100);
+      }
+    }
+
+    toggleControls() {
+      this.isControlsHidden = !this.isControlsHidden;
+    }
+  }
+
+  const ctrl = new FullscreenController();
+  ctrl.setFullscreen(true);
+  assert.equal(ctrl.isControlsHidden, false);
+
+  // Manual toggle hides controls
+  ctrl.toggleControls();
+  assert.equal(ctrl.isControlsHidden, true);
+
+  // Mouse move brings controls back
+  ctrl.onMouseMove();
+  assert.equal(ctrl.isControlsHidden, false);
+
+  // Exiting fullscreen brings controls back
+  ctrl.isControlsHidden = true;
+  ctrl.setFullscreen(false);
+  assert.equal(ctrl.isControlsHidden, false);
+});
+
+

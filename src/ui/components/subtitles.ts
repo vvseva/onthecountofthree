@@ -1,12 +1,13 @@
 /**
  * Subtitle and Audio Track Manager
- * Parses .srt and .vtt subtitle files, attaches WebVTT tracks to HTMLMediaElement,
- * manages subtitle timing offset (-5.0s to +5.0s), inspects audio tracks,
- * provides 5.1 surround-to-stereo downmixing with dialogue boost,
+ * Parses .srt and .vtt subtitle files, extracts embedded MKV subtitle tracks (SRT/UTF-8/ASS),
+ * manages subtitle timing offset (-5.0s to +5.0s),
+ * decodes E-AC-3 / AC-3 audio via WASM libavcodec decoder with ITU-R BS.775 5.1 downmixing,
  * and synchronizes external audio tracks (.mp3, .m4a, .aac, .wav, .ogg).
  */
 
-import { inspectContainerAudioTracks, ContainerInspectionResult } from '../../media/trackInspector';
+import { demuxMatroska, extractMatroskaSubtitles, extractAndDecodeEac3Track, DemuxResult, DemuxedTrackInfo } from '../../media/mkvDemuxer';
+export type { DemuxedTrackInfo, DemuxResult };
 
 export interface SubtitleTrackInfo {
   id: string;
@@ -20,12 +21,8 @@ export interface SubtitleTrackInfo {
  * Converts standard SubRip (.srt) text to WebVTT format.
  */
 export function convertSrtToVtt(srtText: string): string {
-  // Normalize line endings
   let normalized = srtText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-
-  // Replace comma decimal separators with dots in timestamps: 00:00:20,000 --> 00:00:20.000
   normalized = normalized.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
-
   return `WEBVTT\n\n${normalized.trim()}\n`;
 }
 
@@ -40,9 +37,7 @@ export function createVttBlobUrl(text: string, isSrt = false): string {
 
 /**
  * Web Audio 5.1 Surround to Stereo Downmixer & Dialogue Booster
- * Routes 6-channel surround sound (Left, Right, Center, LFE, Surround Left, Surround Right)
- * into a balanced 2-channel stereo output according to ITU-R BS.775,
- * boosting dialogue on the center channel so movies with 6 channels play sound properly.
+ * Routes 6-channel surround sound into stereo with dialogue boost.
  */
 export class AudioDownmixEngine {
   private audioCtx: AudioContext | null = null;
@@ -76,7 +71,6 @@ export class AudioDownmixEngine {
         this.masterGain = this.audioCtx.createGain();
         this.masterGain.gain.value = 1.35; // Dialogue boost
 
-        // Determine channel count (typically 6 for 5.1 surround, or 2 for stereo)
         const channels = Math.max(2, this.sourceNode.channelCount || 2);
         this.splitter = this.audioCtx.createChannelSplitter(channels);
         this.merger = this.audioCtx.createChannelMerger(2);
@@ -84,8 +78,6 @@ export class AudioDownmixEngine {
         this.sourceNode.connect(this.splitter);
 
         if (channels >= 6) {
-          // ITU-R BS.775 coefficients for 5.1 -> 2.0 Stereo:
-          // Left output (0):
           const centerGainL = this.audioCtx.createGain();
           centerGainL.gain.value = 0.7071;
           const lfeGainL = this.audioCtx.createGain();
@@ -93,7 +85,7 @@ export class AudioDownmixEngine {
           const slGainL = this.audioCtx.createGain();
           slGainL.gain.value = 0.7071;
 
-          this.splitter.connect(this.merger, 0, 0); // Left -> Left
+          this.splitter.connect(this.merger, 0, 0);
           this.splitter.connect(centerGainL, 2);
           centerGainL.connect(this.merger, 0, 0);
           this.splitter.connect(lfeGainL, 3);
@@ -101,7 +93,6 @@ export class AudioDownmixEngine {
           this.splitter.connect(slGainL, 4);
           slGainL.connect(this.merger, 0, 0);
 
-          // Right output (1):
           const centerGainR = this.audioCtx.createGain();
           centerGainR.gain.value = 0.7071;
           const lfeGainR = this.audioCtx.createGain();
@@ -109,7 +100,7 @@ export class AudioDownmixEngine {
           const srGainR = this.audioCtx.createGain();
           srGainR.gain.value = 0.7071;
 
-          this.splitter.connect(this.merger, 1, 1); // Right -> Right
+          this.splitter.connect(this.merger, 1, 1);
           this.splitter.connect(centerGainR, 2);
           centerGainR.connect(this.merger, 0, 1);
           this.splitter.connect(lfeGainR, 3);
@@ -117,7 +108,6 @@ export class AudioDownmixEngine {
           this.splitter.connect(srGainR, 5);
           srGainR.connect(this.merger, 0, 1);
         } else {
-          // Pass-through stereo with dialogue boost
           this.splitter.connect(this.merger, 0, 0);
           this.splitter.connect(this.merger, 1, 1);
         }
@@ -141,9 +131,121 @@ export class AudioDownmixEngine {
 }
 
 /**
+ * Synchronized AudioBuffer Player (for WASM E-AC-3 / AC-3 decoded streams)
+ */
+export class AudioBufferSynchronizer {
+  private audioCtx: AudioContext | null = null;
+  private buffer: AudioBuffer | null = null;
+  private source: AudioBufferSourceNode | null = null;
+  private gainNode: GainNode | null = null;
+  private video: HTMLVideoElement;
+  private isSynchronizing = false;
+  private currentVol = 1.0;
+  private isMuted = false;
+
+  constructor(video: HTMLVideoElement) {
+    this.video = video;
+  }
+
+  public setBuffer(buffer: AudioBuffer): void {
+    this.cleanup();
+    this.buffer = buffer;
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    this.audioCtx = new AudioCtx();
+    this.gainNode = this.audioCtx.createGain();
+    this.gainNode.gain.value = this.isMuted ? 0 : this.currentVol;
+    this.gainNode.connect(this.audioCtx.destination);
+
+    this.video.volume = 0; // Silence native HTML5 element
+    this.isSynchronizing = true;
+
+    this.video.addEventListener('play', this.onPlay);
+    this.video.addEventListener('pause', this.onPause);
+    this.video.addEventListener('seeking', this.onSeek);
+    this.video.addEventListener('seeked', this.onSeek);
+    this.video.addEventListener('ratechange', this.onRateChange);
+
+    if (!this.video.paused) {
+      this.play(this.video.currentTime);
+    }
+  }
+
+  public setVolume(vol: number): void {
+    this.currentVol = Math.max(0, Math.min(1, vol));
+    if (this.gainNode) {
+      this.gainNode.gain.value = this.isMuted ? 0 : this.currentVol;
+    }
+  }
+
+  public setMuted(muted: boolean): void {
+    this.isMuted = muted;
+    if (this.gainNode) {
+      this.gainNode.gain.value = muted ? 0 : this.currentVol;
+    }
+  }
+
+  private play(fromSec: number): void {
+    if (!this.audioCtx || !this.buffer || !this.gainNode) return;
+    this.stop();
+
+    if (this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
+    }
+
+    this.source = this.audioCtx.createBufferSource();
+    this.source.buffer = this.buffer;
+    this.source.playbackRate.value = this.video.playbackRate;
+    this.source.connect(this.gainNode);
+
+    const safeFrom = Math.max(0, Math.min(this.buffer.duration, fromSec));
+    this.source.start(0, safeFrom);
+  }
+
+  private stop(): void {
+    if (this.source) {
+      try { this.source.stop(); } catch {}
+      this.source.disconnect();
+      this.source = null;
+    }
+  }
+
+  private onPlay = () => this.play(this.video.currentTime);
+  private onPause = () => this.stop();
+  private onSeek = () => {
+    if (!this.video.paused) {
+      this.play(this.video.currentTime);
+    }
+  };
+  private onRateChange = () => {
+    if (this.source) {
+      this.source.playbackRate.value = this.video.playbackRate;
+    }
+  };
+
+  public getIsActive(): boolean {
+    return this.isSynchronizing;
+  }
+
+  public cleanup(): void {
+    this.stop();
+    this.video.removeEventListener('play', this.onPlay);
+    this.video.removeEventListener('pause', this.onPause);
+    this.video.removeEventListener('seeking', this.onSeek);
+    this.video.removeEventListener('seeked', this.onSeek);
+    this.video.removeEventListener('ratechange', this.onRateChange);
+
+    if (this.audioCtx) {
+      this.audioCtx.close().catch(() => {});
+      this.audioCtx = null;
+    }
+    this.buffer = null;
+    this.isSynchronizing = false;
+    this.video.volume = this.currentVol;
+  }
+}
+
+/**
  * Synchronized External Audio Track Manager
- * Allows loading separate audio files (.mp3, .m4a, .aac, .ogg, .wav, .flac)
- * and plays them in strict sync with video element playback, seek, rate, and volume.
  */
 export class ExternalAudioManager {
   private audioElement: HTMLAudioElement | null = null;
@@ -166,8 +268,7 @@ export class ExternalAudioManager {
     this.audioElement.muted = this.video.muted;
     this.audioElement.playbackRate = this.video.playbackRate;
 
-    // Synchronize audio element with video element
-    this.video.muted = true; // Mute video's embedded audio track
+    this.video.volume = 0;
     this.isExternalActive = true;
 
     this.video.addEventListener('play', this.onVideoPlay);
@@ -175,7 +276,6 @@ export class ExternalAudioManager {
     this.video.addEventListener('seeking', this.onVideoSeeking);
     this.video.addEventListener('seeked', this.onVideoSeeked);
     this.video.addEventListener('ratechange', this.onVideoRateChange);
-    this.video.addEventListener('volumechange', this.onVideoVolumeChange);
 
     if (!this.video.paused) {
       this.audioElement.play().catch(() => {});
@@ -184,12 +284,24 @@ export class ExternalAudioManager {
     return this.filename;
   }
 
+  public setVolume(vol: number): void {
+    if (this.audioElement) {
+      this.audioElement.volume = vol;
+    }
+  }
+
+  public setMuted(muted: boolean): void {
+    if (this.audioElement) {
+      this.audioElement.muted = muted;
+    }
+  }
+
   public disable(): void {
     if (this.isExternalActive) {
       if (this.audioElement) {
         this.audioElement.pause();
       }
-      this.video.muted = false; // Restore embedded audio
+      this.video.volume = 1;
       this.isExternalActive = false;
     }
   }
@@ -201,7 +313,6 @@ export class ExternalAudioManager {
     this.video.removeEventListener('seeking', this.onVideoSeeking);
     this.video.removeEventListener('seeked', this.onVideoSeeked);
     this.video.removeEventListener('ratechange', this.onVideoRateChange);
-    this.video.removeEventListener('volumechange', this.onVideoVolumeChange);
 
     if (this.objectUrl) {
       URL.revokeObjectURL(this.objectUrl);
@@ -242,13 +353,6 @@ export class ExternalAudioManager {
     }
   };
 
-  private onVideoVolumeChange = () => {
-    if (this.isExternalActive && this.audioElement) {
-      this.audioElement.volume = this.video.volume;
-      this.audioElement.muted = this.video.muted;
-    }
-  };
-
   public getActiveFilename(): string | null {
     return this.isExternalActive ? this.filename : null;
   }
@@ -262,28 +366,63 @@ export class SubtitleAndAudioManager {
   private currentOffset = 0; // seconds
   private downmixEngine: AudioDownmixEngine;
   private externalAudioManager: ExternalAudioManager;
-  private lastInspectionResult: ContainerInspectionResult | null = null;
+  private bufferSynchronizer: AudioBufferSynchronizer;
+  private currentFile: File | null = null;
+  private demuxResult: DemuxResult | null = null;
 
   constructor(video: HTMLVideoElement) {
     this.video = video;
     this.downmixEngine = new AudioDownmixEngine(video);
     this.externalAudioManager = new ExternalAudioManager(video);
+    this.bufferSynchronizer = new AudioBufferSynchronizer(video);
   }
 
-  public async inspectVideoFile(file: File): Promise<ContainerInspectionResult> {
-    const inspection = await inspectContainerAudioTracks(file);
-    this.lastInspectionResult = inspection;
+  public async inspectVideoFile(file: File): Promise<DemuxResult> {
+    this.currentFile = file;
+    this.demuxResult = await demuxMatroska(file);
 
-    // Automatically enable 5.1 downmixing if multi-channel surround sound (6ch) is detected
-    if (inspection.hasMultiChannel) {
+    if (this.demuxResult.hasMultiChannel) {
       this.downmixEngine.enable();
     }
 
-    return inspection;
+    return this.demuxResult;
   }
 
-  public getInspectionResult(): ContainerInspectionResult | null {
-    return this.lastInspectionResult;
+  public getDemuxResult(): DemuxResult | null {
+    return this.demuxResult;
+  }
+
+  public async extractAndApplyEmbeddedSubtitle(trackNumber: number): Promise<string> {
+    if (!this.currentFile) throw new Error('No video file loaded');
+    const vtt = await extractMatroskaSubtitles(this.currentFile, trackNumber);
+    this.currentRawText = vtt;
+    this.isSrt = false;
+    const trackInfo = this.demuxResult?.subtitleTracks.find((t) => t.trackNumber === trackNumber);
+    const label = trackInfo?.name || `Subtitle ${trackNumber}`;
+    this.applySubtitlesWithOffset(this.currentOffset, label);
+    return label;
+  }
+
+  public async decodeAndPlayEac3Audio(trackNumber: number, onProgress?: (pct: number) => void): Promise<void> {
+    if (!this.currentFile) throw new Error('No video file loaded');
+    const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const tempCtx = new AudioCtx();
+    const audioBuffer = await extractAndDecodeEac3Track(this.currentFile, trackNumber, tempCtx, onProgress);
+    this.bufferSynchronizer.setBuffer(audioBuffer);
+  }
+
+  public setVolume(vol: number): void {
+    this.bufferSynchronizer.setVolume(vol);
+    this.externalAudioManager.setVolume(vol);
+  }
+
+  public setMuted(muted: boolean): void {
+    this.bufferSynchronizer.setMuted(muted);
+    this.externalAudioManager.setMuted(muted);
+  }
+
+  public isDecodedAudioActive(): boolean {
+    return this.bufferSynchronizer.getIsActive();
   }
 
   public enableDownmixing(): boolean {
@@ -295,10 +434,12 @@ export class SubtitleAndAudioManager {
   }
 
   public loadExternalAudio(file: File): string {
+    this.bufferSynchronizer.cleanup();
     return this.externalAudioManager.loadTrack(file);
   }
 
   public useDefaultEmbeddedAudio(): void {
+    this.bufferSynchronizer.cleanup();
     this.externalAudioManager.disable();
   }
 
@@ -385,19 +526,18 @@ export class SubtitleAndAudioManager {
   }
 
   public disableSubtitles(): void {
+    if (this.currentTrackEl) {
+      this.currentTrackEl.remove();
+      this.currentTrackEl = null;
+    }
     for (let i = 0; i < this.video.textTracks.length; i++) {
       this.video.textTracks[i].mode = 'disabled';
     }
   }
 
-  /**
-   * Inspects available native audio tracks if supported by browser (e.g. Safari).
-   */
   public getAvailableNativeAudioTracks(): { index: number; label: string; language: string; enabled: boolean }[] {
     const media = this.video as unknown as { audioTracks?: { length: number; [index: number]: { label: string; language: string; enabled: boolean } } };
-    if (!media.audioTracks) {
-      return [];
-    }
+    if (!media.audioTracks) return [];
 
     const list = [];
     for (let i = 0; i < media.audioTracks.length; i++) {
