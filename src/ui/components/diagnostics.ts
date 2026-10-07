@@ -12,11 +12,12 @@ export interface DiagnosticsCallbacks {
 
 export class DiagnosticsComponent {
   private element: HTMLElement;
-  private isExpanded = true;
+  private isExpanded = false;
   private rttValEl: HTMLElement;
   private driftValEl: HTMLElement;
   private rateValEl: HTMLElement;
   private peerTimeValEl: HTMLElement;
+  private fingerprintValEl: HTMLElement;
   private relayTableBody: HTMLElement;
   private logConsole: HTMLElement;
   private addRelayInput: HTMLInputElement;
@@ -30,12 +31,12 @@ export class DiagnosticsComponent {
     this.element.className = 'diagnostics-accordion';
 
     this.element.innerHTML = `
-      <div class="accordion-header" id="diag-toggle" role="button" tabindex="0" aria-expanded="true">
+      <div class="accordion-header" id="diag-toggle" role="button" tabindex="0" aria-expanded="false">
         <span>📊 SYSTEM DIAGNOSTICS & NOSTR RELAY MONITOR</span>
-        <span id="accordion-icon">▲ Hide</span>
+        <span id="accordion-icon">▼ Show</span>
       </div>
 
-      <div class="accordion-content" id="diag-content">
+      <div class="accordion-content" id="diag-content" style="display: none;">
         <!-- Live Metrics Cards -->
         <div class="diagnostics-grid">
           <div class="diag-card">
@@ -56,6 +57,16 @@ export class DiagnosticsComponent {
           <div class="diag-card">
             <div class="diag-card-title">Estimated Peer Position</div>
             <div class="diag-card-value" id="diag-peer-time">--:--</div>
+          </div>
+
+          <div class="diag-card">
+            <div class="diag-card-title">Fuzzy File Fingerprint</div>
+            <div class="diag-card-value" id="diag-fingerprint" style="color: #555555;">No Local File</div>
+          </div>
+
+          <div class="diag-card">
+            <div class="diag-card-title">E2EE Cryptographic Security</div>
+            <div class="diag-card-value" style="font-size: 11px; color: #008000;">AES-GCM-256 • 12B IV • Ephemeral Nostr</div>
           </div>
         </div>
 
@@ -98,6 +109,7 @@ export class DiagnosticsComponent {
     this.driftValEl = this.element.querySelector('#diag-drift')!;
     this.rateValEl = this.element.querySelector('#diag-rate')!;
     this.peerTimeValEl = this.element.querySelector('#diag-peer-time')!;
+    this.fingerprintValEl = this.element.querySelector('#diag-fingerprint')!;
     this.relayTableBody = this.element.querySelector('#relay-table-body')!;
     this.logConsole = this.element.querySelector('#log-terminal')!;
     this.addRelayInput = this.element.querySelector('#input-custom-relay')!;
@@ -109,6 +121,34 @@ export class DiagnosticsComponent {
 
   public getElement(): HTMLElement {
     return this.element;
+  }
+
+  public toggle(): void {
+    this.isExpanded = !this.isExpanded;
+    this.contentContainer.style.display = this.isExpanded ? 'block' : 'none';
+    this.element.querySelector('#accordion-icon')!.textContent = this.isExpanded ? '▲ Hide' : '▼ Show';
+    this.toggleBtn.setAttribute('aria-expanded', this.isExpanded.toString());
+  }
+
+  public updateFingerprint(status: 'NO_LOCAL_FILE' | 'WAITING_FOR_PEER' | 'VERIFIED' | 'MISMATCH', localCode?: string, peerCode?: string): void {
+    switch (status) {
+      case 'NO_LOCAL_FILE':
+        this.fingerprintValEl.textContent = 'No Local File';
+        this.fingerprintValEl.style.color = '#555555';
+        break;
+      case 'WAITING_FOR_PEER':
+        this.fingerprintValEl.textContent = `${localCode || '---'} (Waiting Peer)`;
+        this.fingerprintValEl.style.color = '#cc8800';
+        break;
+      case 'VERIFIED':
+        this.fingerprintValEl.textContent = `[VERIFIED] ${localCode}`;
+        this.fingerprintValEl.style.color = '#008000';
+        break;
+      case 'MISMATCH':
+        this.fingerprintValEl.textContent = `[MISMATCH] ${localCode || '?'} ≠ ${peerCode || '?'}`;
+        this.fingerprintValEl.style.color = '#cc0000';
+        break;
+    }
   }
 
   private setupEvents(): void {

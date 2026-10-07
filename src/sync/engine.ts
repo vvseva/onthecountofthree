@@ -3,7 +3,7 @@
  * State machine handling PLAY, PAUSE, SEEK, PING, PONG, and dynamic drift correction.
  */
 
-import { SyncPayload, SyncEventType, PeerState, FingerprintMatchStatus } from '../types';
+import { SyncPayload, SyncEventType, PeerState, FingerprintMatchStatus, ChatMessagePayload } from '../types';
 import { NostrRelayPool } from '../network/relayPool';
 import { NostrIdentity, signEphemeralSyncEvent } from '../network/nostrIdentity';
 import { encryptPayload, decryptPayload } from '../crypto/e2ee';
@@ -22,6 +22,10 @@ export interface SyncEngineCallbacks {
     localTimeSec: number;
   }) => void;
   onLog: (msg: string, level?: 'info' | 'warn' | 'error') => void;
+  onCountdownStart: (targetStartTime: number) => void;
+  onCountdownAbort: () => void;
+  onChatMessage: (msg: ChatMessagePayload, isSelf: boolean) => void;
+  onPauseWithDetails: (pausedBy: string, timeSec: number) => void;
 }
 
 export class SyncEngine {
@@ -39,6 +43,8 @@ export class SyncEngine {
   private pingIntervalTimer: number | null = null;
   private driftCheckTimer: number | null = null;
   private activePeer: PeerState | null = null;
+  private lastReportedFpStatus: FingerprintMatchStatus | null = null;
+  private lastReportedPeerFp: string | null = null;
 
   // Track pending ping timestamps
   private pendingPings = new Map<string, number>();
@@ -88,6 +94,8 @@ export class SyncEngine {
   public setRoomCredentials(aesKey: CryptoKey, hashedRoomTag: string): void {
     this.aesKey = aesKey;
     this.hashedRoomTag = hashedRoomTag;
+    this.lastReportedFpStatus = null;
+    this.lastReportedPeerFp = null;
     this.relayPool.setRoomTag(hashedRoomTag);
     // Announce presence immediately
     this.broadcastEvent('ANNOUNCE');
@@ -152,7 +160,12 @@ export class SyncEngine {
   private async broadcastEvent(
     type: SyncEventType,
     pingNonce?: string,
-    echoTimestamp?: number
+    echoTimestamp?: number,
+    extra?: {
+      targetStartTime?: number;
+      chatMessage?: ChatMessagePayload;
+      pausedBy?: string;
+    }
   ): Promise<void> {
     if (!this.aesKey || !this.hashedRoomTag) return;
 
@@ -174,7 +187,10 @@ export class SyncEngine {
       fingerprint: this.localFingerprint || undefined,
       duration: duration || undefined,
       pingNonce,
-      echoTimestamp
+      echoTimestamp,
+      targetStartTime: extra?.targetStartTime,
+      chatMessage: extra?.chatMessage,
+      pausedBy: extra?.pausedBy
     };
 
     try {
@@ -247,10 +263,39 @@ export class SyncEngine {
 
       case 'PAUSE':
         this.handleRemotePause(payload);
+        this.callbacks.onPauseWithDetails(payload.pausedBy || payload.senderId, payload.playbackTime);
         break;
 
       case 'SEEK':
         this.handleRemoteSeek(payload);
+        break;
+
+      case 'COUNTDOWN_START':
+        if (payload.targetStartTime) {
+          this.callbacks.onLog(`[Sync] Peer initiated 3s countdown start at ${this.formatTime(payload.playbackTime)}`);
+          this.callbacks.onCountdownStart(payload.targetStartTime);
+          if (this.video && Math.abs(this.video.currentTime - payload.playbackTime) > 0.3) {
+            this.isApplyingRemoteUpdate = true;
+            this.video.currentTime = Math.max(0, payload.playbackTime + this.manualOffset);
+            setTimeout(() => { this.isApplyingRemoteUpdate = false; }, 80);
+          }
+        }
+        break;
+
+      case 'COUNTDOWN_ABORT':
+        this.callbacks.onLog(`[Sync] Peer cancelled countdown`);
+        this.callbacks.onCountdownAbort();
+        if (this.video) {
+          this.isApplyingRemoteUpdate = true;
+          this.video.pause();
+          setTimeout(() => { this.isApplyingRemoteUpdate = false; }, 80);
+        }
+        break;
+
+      case 'CHAT_MESSAGE':
+        if (payload.chatMessage) {
+          this.callbacks.onChatMessage(payload.chatMessage, false);
+        }
         break;
 
       case 'ANNOUNCE':
@@ -469,20 +514,25 @@ export class SyncEngine {
   }
 
   private updateFingerprintStatus(): void {
+    let status: FingerprintMatchStatus = 'NO_LOCAL_FILE';
+    let peerFp: string | undefined = undefined;
+
     if (!this.localFingerprint) {
-      this.callbacks.onFingerprintStatusChange('NO_LOCAL_FILE');
-      return;
-    }
-
-    if (!this.activePeer || !this.activePeer.fingerprint) {
-      this.callbacks.onFingerprintStatusChange('WAITING_FOR_PEER');
-      return;
-    }
-
-    if (this.localFingerprint === this.activePeer.fingerprint) {
-      this.callbacks.onFingerprintStatusChange('VERIFIED', this.activePeer.fingerprint);
+      status = 'NO_LOCAL_FILE';
+    } else if (!this.activePeer || !this.activePeer.fingerprint) {
+      status = 'WAITING_FOR_PEER';
+    } else if (this.localFingerprint === this.activePeer.fingerprint) {
+      status = 'VERIFIED';
+      peerFp = this.activePeer.fingerprint;
     } else {
-      this.callbacks.onFingerprintStatusChange('MISMATCH', this.activePeer.fingerprint);
+      status = 'MISMATCH';
+      peerFp = this.activePeer.fingerprint;
+    }
+
+    if (status !== this.lastReportedFpStatus || peerFp !== this.lastReportedPeerFp) {
+      this.lastReportedFpStatus = status;
+      this.lastReportedPeerFp = peerFp || null;
+      this.callbacks.onFingerprintStatusChange(status, peerFp);
     }
   }
 
@@ -507,6 +557,43 @@ export class SyncEngine {
     const secs = Math.floor(seconds % 60).toString().padStart(2, '0');
     const ms = Math.floor((seconds % 1) * 100).toString().padStart(2, '0');
     return `${mins}:${secs}.${ms}`;
+  }
+
+  public requestPlay(instant = false): void {
+    if (!this.video) return;
+
+    if (instant) {
+      this.callbacks.onLog('[Local] Starting instant playback');
+      this.broadcastEvent('PLAY');
+      this.video.play().catch(() => {});
+      return;
+    }
+
+    const targetStartTime = Date.now() + 3000;
+    this.callbacks.onLog('[Local] Initiating synchronized 3s countdown');
+    this.broadcastEvent('COUNTDOWN_START', undefined, undefined, { targetStartTime });
+    this.callbacks.onCountdownStart(targetStartTime);
+  }
+
+  public requestPause(): void {
+    if (!this.video) return;
+    this.callbacks.onLog('[Local] Pausing playback');
+    this.broadcastEvent('PAUSE', undefined, undefined, { pausedBy: this.senderId });
+    this.broadcastEvent('COUNTDOWN_ABORT');
+    this.video.pause();
+    this.callbacks.onCountdownAbort();
+    this.callbacks.onPauseWithDetails('You', this.video.currentTime);
+  }
+
+  public sendChatMessage(text: string): void {
+    const chatMessage: ChatMessagePayload = {
+      id: Math.random().toString(36).substring(2, 10),
+      senderId: this.senderId,
+      timestamp: Date.now(),
+      text
+    };
+    this.broadcastEvent('CHAT_MESSAGE', undefined, undefined, { chatMessage });
+    this.callbacks.onChatMessage(chatMessage, true);
   }
 
   public destroy(): void {

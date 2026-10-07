@@ -13,6 +13,7 @@ import {
 } from './crypto/keyManager';
 import { createEphemeralIdentity } from './network/nostrIdentity';
 import { NostrRelayPool, DEFAULT_RELAYS } from './network/relayPool';
+import { PairingCodeService } from './network/pairingCode';
 import { SyncEngine } from './sync/engine';
 import { AriaAnnouncer } from './ui/ariaAnnouncer';
 import { setupKeyboardShortcuts } from './ui/keyboardShortcuts';
@@ -22,14 +23,26 @@ import { RoomBar } from './ui/components/roomBar';
 import { VideoPlayerComponent } from './ui/components/videoPlayer';
 import { OffsetSliderComponent } from './ui/components/offsetSlider';
 import { DiagnosticsComponent } from './ui/components/diagnostics';
+import { ToastNotificationManager } from './ui/components/toastNotification';
+import { ChatWindowComponent } from './ui/components/chatWindow';
 import { openInfoModal } from './ui/components/shareModal';
+import { openPairingModal } from './ui/components/pairingModal';
+import { PeerState } from './types';
+
+function formatTime(sec: number): string {
+  if (isNaN(sec) || sec < 0) sec = 0;
+  const mins = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+}
 
 async function bootstrapApp() {
   const root = document.getElementById('app');
   if (!root) throw new Error('Root #app container not found');
 
-  // 1. Accessibility announcer
+  // 1. Accessibility announcer & Transient Toast Notification Manager
   const announcer = new AriaAnnouncer();
+  const toastManager = new ToastNotificationManager();
 
   // 2. Cryptographic credentials (from hash or freshly generated)
   let credentials: RoomCredentials = (await parseCredentialsFromHash()) || (await generateRoomCredentials());
@@ -38,11 +51,39 @@ async function bootstrapApp() {
   // 3. Ephemeral Nostr Identity (in-memory throwaway keypair)
   const nostrIdentity = createEphemeralIdentity();
 
-  // 4. Multi-Relay Nostr WebSocket Transport Pool
+  // 4. Multi-Relay Nostr WebSocket Transport Pool & Yellkey Pairing Service
   const relayPool = new NostrRelayPool(DEFAULT_RELAYS);
+  const pairingService = new PairingCodeService(relayPool);
 
   // 5. Initialize UI Components
   const badgesBar = new BadgesBar();
+
+  const diagnostics = new DiagnosticsComponent({
+    onAddRelay: (url) => {
+      relayPool.addRelay(url);
+      diagnostics.appendLog(`[Relay] Added custom relay: ${url}`);
+    },
+    onRemoveRelay: (url) => {
+      relayPool.removeRelay(url);
+      diagnostics.appendLog(`[Relay] Removed relay: ${url}`, 'warn');
+    }
+  });
+
+  let chatCol: HTMLElement;
+
+  const chatWindow = new ChatWindowComponent({
+    onSendMessage: (text) => {
+      syncEngine.sendChatMessage(text);
+    },
+    onVisibilityChange: (isOpen) => {
+      if (isOpen) {
+        roomBar.updateUnreadChat(0);
+        if (chatCol) chatCol.style.display = 'block';
+      } else {
+        if (chatCol) chatCol.style.display = 'none';
+      }
+    }
+  });
 
   const roomBar = new RoomBar({
     onNewRoom: async () => {
@@ -56,18 +97,30 @@ async function bootstrapApp() {
     onOpenInfoModal: () => {
       const shareUrl = buildShareUrl(credentials.roomId, credentials.keyBase64);
       openInfoModal(shareUrl, () => {});
+    },
+    onOpenPairingModal: () => {
+      openPairingModal({
+        pairingService,
+        currentRoomId: credentials.roomId,
+        currentKeyBase64: credentials.keyBase64,
+        onJoinRoom: (newRoomId, newKeyBase64) => {
+          setUrlHash(newRoomId, newKeyBase64);
+          window.location.hash = `#room=${encodeURIComponent(newRoomId)}&key=${encodeURIComponent(newKeyBase64)}`;
+          window.location.reload();
+        },
+        onClose: () => {}
+      });
+    },
+    onToggleChat: () => {
+      chatWindow.toggle();
+    },
+    onToggleDiagnostics: () => {
+      diagnostics.toggle();
     }
   });
 
-  const diagnostics = new DiagnosticsComponent({
-    onAddRelay: (url) => {
-      relayPool.addRelay(url);
-      diagnostics.appendLog(`[Relay] Added custom relay: ${url}`);
-    },
-    onRemoveRelay: (url) => {
-      relayPool.removeRelay(url);
-      diagnostics.appendLog(`[Relay] Removed relay: ${url}`, 'warn');
-    }
+  chatWindow.setUnreadBadgeCallback((count) => {
+    roomBar.updateUnreadChat(count);
   });
 
   const offsetSlider = new OffsetSliderComponent({
@@ -78,19 +131,47 @@ async function bootstrapApp() {
   });
 
   let currentPeerFingerprint: string | undefined = undefined;
+  let previousPeer: PeerState | null = null;
 
   // 6. Synchronization & Drift Engine
   const syncEngine = new SyncEngine(nostrIdentity, relayPool, {
     onPeerUpdate: (peer) => {
       badgesBar.updatePeerState(peer);
       currentPeerFingerprint = peer?.fingerprint;
+
+      // Toast when peer connects/disconnects (no chat crowding)
+      if (peer && !previousPeer) {
+        toastManager.show({
+          title: 'Peer Connected',
+          message: `User <strong>${peer.peerId}</strong> joined the room.<br><small>End-to-end encrypted session established.</small>`,
+          icon: '👋',
+          type: 'info',
+          durationMs: 4000
+        });
+      } else if (!peer && previousPeer) {
+        toastManager.show({
+          title: 'Peer Disconnected',
+          message: `Peer <strong>${previousPeer.peerId}</strong> disconnected or timed out.`,
+          icon: '🔌',
+          type: 'warn',
+          durationMs: 4000
+        });
+      }
+      previousPeer = peer;
     },
     onFingerprintStatusChange: (status, peerFp) => {
-      badgesBar.updateFingerprint(status, syncEngine.getLocalFingerprint() || undefined, peerFp);
+      diagnostics.updateFingerprint(status, syncEngine.getLocalFingerprint() || undefined, peerFp);
       if (status === 'VERIFIED') {
-        announcer.announce('Fingerprint verified: identical video file detected with peer.');
+        // Silently updated in diagnostics card; no distracting popups
       } else if (status === 'MISMATCH') {
         announcer.announce('Warning: Fingerprint mismatch! Peer has a different file.');
+        toastManager.show({
+          title: 'Fingerprint Mismatch',
+          message: `Warning: Local file code does not match peer's file!`,
+          icon: '⚠',
+          type: 'warn',
+          durationMs: 6000
+        });
       }
     },
     onAnnounceMessage: (msg) => {
@@ -101,6 +182,26 @@ async function bootstrapApp() {
     },
     onLog: (msg, level) => {
       diagnostics.appendLog(msg, level);
+    },
+    onCountdownStart: (targetStartTime) => {
+      announcer.announce('Countdown started: playing on the count of three');
+      videoPlayer.startSynchronizedCountdown(targetStartTime, () => {
+        videoPlayer.getVideoElement().play().catch(() => {});
+      });
+    },
+    onCountdownAbort: () => {
+      announcer.announce('Countdown cancelled');
+      videoPlayer.cancelCountdown();
+    },
+    onChatMessage: (msg, isSelf) => {
+      chatWindow.addMessage(msg, isSelf);
+      if (!isSelf) {
+        announcer.announce(`New message from peer: ${msg.text}`);
+      }
+    },
+    onPauseWithDetails: (pausedBy, timeSec) => {
+      const bannerMsg = `Paused by ${pausedBy === 'You' ? 'You' : `Peer ${pausedBy.slice(0, 4)}`} at ${formatTime(timeSec)}`;
+      videoPlayer.showPauseBanner(bannerMsg);
     }
   });
 
@@ -122,14 +223,17 @@ async function bootstrapApp() {
   const videoPlayer = new VideoPlayerComponent({
     onFingerprintComputed: (fpResult) => {
       syncEngine.setLocalFingerprint(fpResult.code);
-      badgesBar.updateFingerprint(
+      diagnostics.updateFingerprint(
         currentPeerFingerprint === fpResult.code ? 'VERIFIED' : (currentPeerFingerprint ? 'MISMATCH' : 'WAITING_FOR_PEER'),
         fpResult.code,
         currentPeerFingerprint
       );
     },
-    onUserPlayPause: () => {
-      videoPlayer.togglePlayPause();
+    onUserPlayRequest: (instant) => {
+      syncEngine.requestPlay(instant);
+    },
+    onUserPauseRequest: () => {
+      syncEngine.requestPause();
     },
     onUserSeek: (targetTime) => {
       diagnostics.appendLog(`[Video] Scrubbed timeline to ${targetTime.toFixed(2)}s`);
@@ -147,7 +251,7 @@ async function bootstrapApp() {
 
   // 8. Keyboard Shortcuts
   setupKeyboardShortcuts({
-    onTogglePlayPause: () => videoPlayer.togglePlayPause(),
+    onTogglePlayPause: () => videoPlayer.triggerPlayPauseAction(),
     onSeekRelative: (sec) => videoPlayer.seekRelative(sec),
     onVolumeChange: (delta) => videoPlayer.adjustVolume(delta),
     onToggleFullscreen: () => videoPlayer.toggleFullscreen(),
@@ -176,9 +280,24 @@ async function bootstrapApp() {
 
   windowBody.appendChild(roomBar.getElement());
   windowBody.appendChild(badgesBar.getElement());
-  windowBody.appendChild(videoPlayer.getElement());
-  windowBody.appendChild(offsetSlider.getElement());
-  windowBody.appendChild(diagnostics.getElement());
+
+  // Main Workspace: Media on left, Chat on right
+  const workspaceRow = document.createElement('div');
+  workspaceRow.className = 'workspace-row';
+
+  const mediaCol = document.createElement('div');
+  mediaCol.className = 'media-col';
+  mediaCol.appendChild(videoPlayer.getElement());
+  mediaCol.appendChild(offsetSlider.getElement());
+  mediaCol.appendChild(diagnostics.getElement());
+
+  chatCol = document.createElement('div');
+  chatCol.className = 'chat-col';
+  chatCol.appendChild(chatWindow.getElement());
+
+  workspaceRow.appendChild(mediaCol);
+  workspaceRow.appendChild(chatCol);
+  windowBody.appendChild(workspaceRow);
 
   windowFrame.appendChild(windowTitlebar);
   windowFrame.appendChild(windowBody);
@@ -190,7 +309,7 @@ async function bootstrapApp() {
   footer.innerHTML = `
     <span>Status: SYSTEM READY • ZERO-BACKEND STATIC CLIENT</span>
     <span>Hotkeys: [Space] Play/Pause • [← / →] ±5s Seek • [↑ / ↓] Volume • [F] Fullscreen • [M] Mute</span>
-    <span>Nostr Transport: 3 Relays Active</span>
+    <span>Countdown: 3s SYNCHRONIZED PLAY</span>
   `;
   root.appendChild(footer);
 

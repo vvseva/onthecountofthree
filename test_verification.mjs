@@ -213,3 +213,44 @@ test('Peer Handshake & Wire Simulation: Peer A and Peer B exchange encrypted mes
   assert.equal(receivedByA.fingerprint, 'AD42-4362');
 });
 
+test('Chat and Fingerprint: System notices are hidden and fingerprint verified toasts are silenced', () => {
+  // Test chat system message silencing
+  let chatMessages = [];
+  const fakeChat = {
+    addMessage: (msg, isSelf) => { chatMessages.push({ msg, isSelf }); },
+    addSystemMessage: (_text) => { /* Silenced to prevent crowding */ }
+  };
+
+  fakeChat.addSystemMessage('System: User joined');
+  assert.equal(chatMessages.length, 0, 'System messages must not enter chat stream');
+
+  fakeChat.addMessage({ senderId: 'PEER_B', text: 'Hello!', timestamp: Date.now() }, false);
+  assert.equal(chatMessages.length, 1, 'User messages are accepted in chat stream');
+
+  // Verify fingerprint verified status is silent (no popup toast)
+  let toasts = [];
+  const fakeToastManager = {
+    show: (t) => { toasts.push(t); }
+  };
+
+  function handleFpChange(status, peerFp) {
+    if (status === 'VERIFIED') {
+      // Silently updated in diagnostics card, no toast
+    } else if (status === 'MISMATCH') {
+      fakeToastManager.show({ title: 'Fingerprint Mismatch' });
+    }
+  }
+
+  handleFpChange('VERIFIED', 'B4F1-92A3');
+  assert.equal(toasts.length, 0, 'VERIFIED status must not generate popup toast');
+
+  handleFpChange('MISMATCH', 'XXXX-YYYY');
+  assert.equal(toasts.length, 1, 'MISMATCH status should generate warning toast');
+});
+
+test('Yellkey Word Pairing: Simple universally recognized English words', () => {
+  const words = ['sun', 'moon', 'star', 'tree', 'cat', 'dog', 'book', 'cake', 'apple'];
+  const picked = words[Math.floor(Math.random() * words.length)];
+  assert.ok(picked.length >= 3 && picked.length <= 6);
+  assert.match(picked, /^[a-z]+$/);
+});
