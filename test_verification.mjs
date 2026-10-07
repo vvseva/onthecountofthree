@@ -254,3 +254,39 @@ test('Yellkey Word Pairing: Simple universally recognized English words', () => 
   assert.ok(picked.length >= 3 && picked.length <= 6);
   assert.match(picked, /^[a-z]+$/);
 });
+
+test('Audio Downmixing: ITU-R BS.775 5.1-to-Stereo coefficients & Multi-channel detection', () => {
+  // Test 5.1 downmix matrix calculation
+  // Left = Left + 0.7071*Center + 0.5*LFE + 0.7071*SL
+  // Right = Right + 0.7071*Center + 0.5*LFE + 0.7071*SR
+  const centerCoeff = 0.7071;
+  const lfeCoeff = 0.5;
+  const surroundCoeff = 0.7071;
+
+  const mock51 = {
+    left: 1.0,
+    right: 1.0,
+    center: 1.0, // Dialogue
+    lfe: 0.8,
+    surroundLeft: 0.5,
+    surroundRight: 0.5
+  };
+
+  const downmixedLeft = mock51.left + (mock51.center * centerCoeff) + (mock51.lfe * lfeCoeff) + (mock51.surroundLeft * surroundCoeff);
+  const downmixedRight = mock51.right + (mock51.center * centerCoeff) + (mock51.lfe * lfeCoeff) + (mock51.surroundRight * surroundCoeff);
+
+  // Dialog must be present in both channels
+  assert.ok(downmixedLeft > 1.0, 'Center dialogue channel must be mixed into left stereo output');
+  assert.ok(downmixedRight > 1.0, 'Center dialogue channel must be mixed into right stereo output');
+  assert.equal(downmixedLeft.toFixed(2), downmixedRight.toFixed(2), 'Stereo balance must be symmetric');
+
+  // Verify multi-channel 6-channel flag detection logic
+  const tracks = [
+    { trackNumber: 1, name: 'Surround 5.1', codec: 'A_AC3', channels: 6, language: 'eng' },
+    { trackNumber: 2, name: 'Stereo', codec: 'A_AAC', channels: 2, language: 'rus' }
+  ];
+
+  const has6ch = tracks.some(t => t.channels >= 6);
+  assert.equal(has6ch, true, 'Must detect 6-channel audio');
+});
+

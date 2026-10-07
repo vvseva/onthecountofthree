@@ -314,7 +314,7 @@ async function bootstrapApp() {
   root.appendChild(footer);
 
   diagnostics.appendLog(`[System] Initialized Room ${credentials.roomId.slice(0, 8)}...`);
-  diagnostics.appendLog('[System] Ready for local video drag-and-drop or test pattern generation.');
+  diagnostics.appendLog('[System] Ready for local video file selection.');
 }
 
 // Start application

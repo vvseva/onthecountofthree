@@ -1,12 +1,13 @@
 /**
  * UI Component: Video Player Stage and Tactile Retro Controls
  * Enhanced with synchronized "On The Count Of Three" countdown overlay,
- * pause notification banner, subtitle/audio track management, and instant play toggle.
+ * pause notification banner, subtitle/audio track management, 5.1 stereo downmix,
+ * and responsive full-screen scaling for all screen sizes.
  */
 
 import { computeVideoFingerprint, extractVideoDuration, FingerprintResult } from '../../fingerprint/hasher';
-import { generateTestVideoBlob } from '../../fingerprint/testVideoGenerator';
 import { SubtitleAndAudioManager } from './subtitles';
+import { ContainerInspectionResult } from '../../media/trackInspector';
 
 export interface VideoPlayerCallbacks {
   onFingerprintComputed: (res: FingerprintResult) => void;
@@ -22,7 +23,6 @@ export class VideoPlayerComponent {
   private video: HTMLVideoElement;
   private dropzone: HTMLElement;
   private fileInput: HTMLInputElement;
-  private testVideoBtn: HTMLButtonElement;
   private playPauseBtn: HTMLButtonElement;
   private scrubber: HTMLInputElement;
   private timeDisplay: HTMLElement;
@@ -32,7 +32,7 @@ export class VideoPlayerComponent {
   private rateBadge: HTMLElement;
   private fileDetailsBadge: HTMLElement;
 
-  // New Overlays
+  // Overlays
   private countdownOverlay: HTMLElement;
   private countdownNumberEl: HTMLElement;
   private pauseBannerOverlay: HTMLElement;
@@ -44,7 +44,9 @@ export class VideoPlayerComponent {
   private subSelectEl: HTMLSelectElement;
   private subOffsetSlider: HTMLInputElement;
   private subOffsetReadout: HTMLElement;
+  private audioFileInput: HTMLInputElement;
   private audioSelectEl: HTMLSelectElement;
+  private downmixBtn: HTMLButtonElement;
   private instantPlayCheckbox: HTMLInputElement;
 
   private countdownTimer: number | null = null;
@@ -82,21 +84,19 @@ export class VideoPlayerComponent {
           <div class="dropzone-icon">📼</div>
           <div class="dropzone-title">Select Local Video File</div>
           <div class="dropzone-subtitle">
-            Drag and drop your video file here (MP4, WebM, MKV).
-            Also accepts subtitle files (.srt, .vtt) by drag-and-drop.
+            Drag and drop your local video file here (MP4, MKV, WebM), or click Browse.
+            Also accepts subtitle (.srt, .vtt) and external audio (.mp3, .m4a, .aac) files.
           </div>
 
           <div class="dropzone-actions">
             <button class="retro-btn primary" id="btn-browse-file">
-              📂 Browse Local Video...
-            </button>
-            <button class="retro-btn" id="btn-gen-test-video">
-              🧪 Generate Test Pattern (60s)
+              📂 Select Local Video File...
             </button>
           </div>
 
-          <input type="file" id="video-file-input" accept="video/*" style="display: none;" />
+          <input type="file" id="video-file-input" accept="video/*,.mkv,.mp4,.webm,.avi" style="display: none;" />
           <input type="file" id="sub-file-input" accept=".srt,.vtt,text/vtt" style="display: none;" />
+          <input type="file" id="audio-file-input" accept="audio/*,.mp3,.m4a,.aac,.ogg,.wav,.flac,.ac3" style="display: none;" />
 
           <div class="dropzone-privacy-note">
             🛡 ZERO DATA LEAKAGE: Videos play strictly from local disk. No video bytes or filenames are ever sent.
@@ -154,9 +154,11 @@ export class VideoPlayerComponent {
 
           <div class="media-option-item">
             <label for="audio-select">🔊 Audio:</label>
-            <select id="audio-select" class="retro-select">
-              <option value="default">Default Track</option>
+            <select id="audio-select" class="retro-select" title="Select audio track or load external audio">
+              <option value="default">Default Audio (Embedded)</option>
+              <option value="load">+ Load External Audio File...</option>
             </select>
+            <button class="retro-btn small" id="btn-toggle-downmix" title="Toggle 5.1 Surround to Stereo Downmix & Dialogue Boost">🎚 5.1 Downmix</button>
           </div>
 
           <div class="media-option-item" style="margin-left: auto;">
@@ -172,7 +174,7 @@ export class VideoPlayerComponent {
     this.dropzone = this.element.querySelector('#dropzone-overlay')!;
     this.fileInput = this.element.querySelector('#video-file-input')!;
     this.subFileInput = this.element.querySelector('#sub-file-input')!;
-    this.testVideoBtn = this.element.querySelector('#btn-gen-test-video')!;
+    this.audioFileInput = this.element.querySelector('#audio-file-input')!;
     this.playPauseBtn = this.element.querySelector('#btn-play-pause')!;
     this.scrubber = this.element.querySelector('#scrubber')!;
     this.timeDisplay = this.element.querySelector('#time-display')!;
@@ -194,6 +196,7 @@ export class VideoPlayerComponent {
     this.subOffsetSlider = this.element.querySelector('#sub-offset-range')!;
     this.subOffsetReadout = this.element.querySelector('#sub-offset-readout')!;
     this.audioSelectEl = this.element.querySelector('#audio-select')!;
+    this.downmixBtn = this.element.querySelector('#btn-toggle-downmix')!;
     this.instantPlayCheckbox = this.element.querySelector('#chk-instant-play')!;
 
     this.setupEvents();
@@ -252,31 +255,42 @@ export class VideoPlayerComponent {
       this.subtitleManager.setSubtitleOffset(off);
     });
 
+    // Audio file input & track selection
+    this.audioFileInput.addEventListener('change', () => {
+      if (this.audioFileInput.files && this.audioFileInput.files[0]) {
+        const file = this.audioFileInput.files[0];
+        const loadedName = this.subtitleManager.loadExternalAudio(file);
+        this.callbacks.onLog(`[Audio] Loaded external audio track: ${loadedName}`);
+        this.callbacks.onAnnounce(`External audio track loaded: ${loadedName}`);
+        this.updateAudioSelectWithExternal(loadedName);
+      }
+    });
+
     this.audioSelectEl.addEventListener('change', () => {
-      const idx = parseInt(this.audioSelectEl.value, 10);
-      if (!isNaN(idx)) {
-        this.subtitleManager.selectAudioTrack(idx);
+      const val = this.audioSelectEl.value;
+      if (val === 'load') {
+        this.audioFileInput.click();
+      } else if (val === 'default') {
+        this.subtitleManager.useDefaultEmbeddedAudio();
+        this.callbacks.onLog('[Audio] Switched to default embedded audio track.');
+      } else if (val.startsWith('native_')) {
+        const idx = parseInt(val.replace('native_', ''), 10);
+        this.subtitleManager.selectNativeAudioTrack(idx);
+        this.callbacks.onLog(`[Audio] Switched to native track #${idx + 1}`);
       }
     });
 
-    // Test Video generator
-    this.testVideoBtn.addEventListener('click', async () => {
-      try {
-        this.testVideoBtn.disabled = true;
-        this.testVideoBtn.textContent = '⏳ Rendering Test Pattern (60s)...';
-        const file = await generateTestVideoBlob(60, (pct) => {
-          this.testVideoBtn.textContent = `⏳ Rendering: ${pct}%`;
-        });
-        await this.loadVideoFile(file);
-      } catch (err) {
-        alert('Could not synthesize test video: ' + err);
-      } finally {
-        this.testVideoBtn.disabled = false;
-        this.testVideoBtn.textContent = '🧪 Generate Test Pattern (60s)';
+    this.downmixBtn.addEventListener('click', () => {
+      const success = this.subtitleManager.enableDownmixing();
+      if (success) {
+        this.downmixBtn.textContent = '🎚 5.1 Downmix [ON]';
+        this.downmixBtn.style.color = '#008000';
+        this.callbacks.onLog('[Audio] 5.1 to Stereo downmixer enabled with dialogue boost.');
+        this.callbacks.onAnnounce('5.1 surround sound downmixer activated');
       }
     });
 
-    // Drag and Drop (both video and subtitle files)
+    // Drag and Drop (video, subtitle, and audio files)
     const stageContainer = this.element.querySelector('#stage-container')!;
 
     stageContainer.addEventListener('dragover', (e) => {
@@ -295,8 +309,20 @@ export class VideoPlayerComponent {
       const dt = (e as DragEvent).dataTransfer;
       if (dt && dt.files && dt.files.length > 0) {
         const file = dt.files[0];
-        if (file.name.toLowerCase().endsWith('.srt') || file.name.toLowerCase().endsWith('.vtt')) {
+        const lowerName = file.name.toLowerCase();
+        if (lowerName.endsWith('.srt') || lowerName.endsWith('.vtt')) {
           this.handleLoadedSubtitle(file);
+        } else if (
+          lowerName.endsWith('.mp3') ||
+          lowerName.endsWith('.m4a') ||
+          lowerName.endsWith('.aac') ||
+          lowerName.endsWith('.wav') ||
+          lowerName.endsWith('.ogg') ||
+          lowerName.endsWith('.flac')
+        ) {
+          const loadedName = this.subtitleManager.loadExternalAudio(file);
+          this.callbacks.onLog(`[Audio] Loaded dropped audio track: ${loadedName}`);
+          this.updateAudioSelectWithExternal(loadedName);
         } else {
           this.loadVideoFile(file);
         }
@@ -308,7 +334,32 @@ export class VideoPlayerComponent {
       this.triggerPlayPauseAction();
     });
 
-    // Rewind / Forward 5s
+    // Time update & scrubbing
+    this.video.addEventListener('timeupdate', () => {
+      if (!this.isUserScrubbing && this.video.duration) {
+        this.scrubber.value = ((this.video.currentTime / this.video.duration) * 100).toString();
+        this.updateTimeDisplay(this.video.currentTime, this.video.duration);
+      }
+    });
+
+    this.scrubber.addEventListener('input', () => {
+      this.isUserScrubbing = true;
+      if (this.video.duration) {
+        const target = (parseFloat(this.scrubber.value) / 100) * this.video.duration;
+        this.updateTimeDisplay(target, this.video.duration);
+      }
+    });
+
+    this.scrubber.addEventListener('change', () => {
+      this.isUserScrubbing = false;
+      if (this.video.duration) {
+        const target = (parseFloat(this.scrubber.value) / 100) * this.video.duration;
+        this.video.currentTime = target;
+        this.callbacks.onUserSeek(target);
+      }
+    });
+
+    // ±5s buttons
     this.element.querySelector('#btn-back-5')!.addEventListener('click', () => {
       this.seekRelative(-5);
     });
@@ -317,39 +368,15 @@ export class VideoPlayerComponent {
       this.seekRelative(5);
     });
 
-    // Scrubber
-    this.scrubber.addEventListener('mousedown', () => {
-      this.isUserScrubbing = true;
-    });
-
-    this.scrubber.addEventListener('input', () => {
-      const dur = this.video.duration || 0;
-      if (dur > 0) {
-        const targetTime = (parseFloat(this.scrubber.value) / 100) * dur;
-        this.updateTimeDisplay(targetTime, dur);
-      }
-    });
-
-    this.scrubber.addEventListener('change', () => {
-      this.isUserScrubbing = false;
-      const dur = this.video.duration || 0;
-      if (dur > 0) {
-        const targetTime = (parseFloat(this.scrubber.value) / 100) * dur;
-        this.video.currentTime = targetTime;
-        this.callbacks.onUserSeek(targetTime);
-      }
-    });
-
     // Volume & Mute
     this.volumeSlider.addEventListener('input', () => {
       this.video.volume = parseFloat(this.volumeSlider.value);
       this.video.muted = false;
-      this.updateVolumeUI();
+      this.updateMuteButtonIcon();
     });
 
     this.muteBtn.addEventListener('click', () => {
-      this.video.muted = !this.video.muted;
-      this.updateVolumeUI();
+      this.toggleMute();
     });
 
     // Fullscreen
@@ -357,27 +384,17 @@ export class VideoPlayerComponent {
       this.toggleFullscreen();
     });
 
-    // Video Element status updates
-    this.video.addEventListener('timeupdate', () => {
-      if (!this.isUserScrubbing) {
-        const cur = this.video.currentTime;
-        const dur = this.video.duration || 0;
-        this.updateTimeDisplay(cur, dur);
-        if (dur > 0) {
-          this.scrubber.value = ((cur / dur) * 100).toFixed(1);
-        }
-      }
+    document.addEventListener('fullscreenchange', () => {
+      const isFs = !!document.fullscreenElement;
+      this.fullscreenBtn.textContent = isFs ? '🗗 Exit Fullscreen' : '⛶ Fullscreen';
     });
 
-    this.video.addEventListener('play', () => {
-      this.playPauseBtn.innerHTML = '⏸ Pause';
-      this.hidePauseBanner();
+    document.addEventListener('webkitfullscreenchange', () => {
+      const isFs = !!(document as unknown as { webkitFullscreenElement?: Element }).webkitFullscreenElement;
+      this.fullscreenBtn.textContent = isFs ? '🗗 Exit Fullscreen' : '⛶ Fullscreen';
     });
 
-    this.video.addEventListener('pause', () => {
-      this.playPauseBtn.innerHTML = '▶ Play';
-    });
-
+    // Playback rate sync indicator
     this.video.addEventListener('ratechange', () => {
       this.rateBadge.textContent = `${this.video.playbackRate.toFixed(2)}x`;
       if (this.video.playbackRate !== 1.0) {
@@ -389,43 +406,86 @@ export class VideoPlayerComponent {
       }
     });
 
-    this.video.addEventListener('loadedmetadata', () => {
-      this.refreshAudioTracksUI();
+    // Video play/pause UI sync
+    this.video.addEventListener('play', () => {
+      this.playPauseBtn.textContent = '⏸ Pause';
+      this.hidePauseBanner();
+    });
+
+    this.video.addEventListener('pause', () => {
+      this.playPauseBtn.textContent = '▶ Play';
     });
   }
 
   private async handleLoadedSubtitle(file: File): Promise<void> {
     try {
-      const name = await this.subtitleManager.loadSubtitleFile(file);
-      this.callbacks.onLog(`[Subtitles] Loaded: ${name}`);
-      this.callbacks.onAnnounce(`Subtitles loaded: ${name}`);
+      const label = await this.subtitleManager.loadSubtitleFile(file);
+      this.callbacks.onLog(`[Subtitles] Loaded: ${label}`);
+      this.callbacks.onAnnounce(`Subtitles loaded from ${label}`);
 
-      // Update dropdown option
       const opt = document.createElement('option');
       opt.value = 'custom';
-      opt.textContent = `✔ ${name}`;
+      opt.textContent = `✔ ${label}`;
       opt.selected = true;
-      this.subSelectEl.appendChild(opt);
 
-      // Show offset control
+      const noneOpt = this.subSelectEl.querySelector('option[value="none"]');
+      if (noneOpt) {
+        noneOpt.insertAdjacentElement('afterend', opt);
+      } else {
+        this.subSelectEl.appendChild(opt);
+      }
+
       (this.element.querySelector('#sub-offset-group') as HTMLElement).style.display = 'flex';
     } catch (err) {
-      alert('Failed to parse subtitle file: ' + err);
+      alert(`Could not parse subtitle file: ${err}`);
     }
   }
 
-  private refreshAudioTracksUI(): void {
-    const tracks = this.subtitleManager.getAvailableAudioTracks();
-    if (tracks.length > 1) {
-      this.audioSelectEl.innerHTML = '';
-      tracks.forEach((t) => {
+  private refreshAudioTrackOptions(inspection?: ContainerInspectionResult): void {
+    this.audioSelectEl.innerHTML = '';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = 'default';
+    defaultOpt.textContent = 'Default Audio (Embedded)';
+    this.audioSelectEl.appendChild(defaultOpt);
+
+    // 1. Native tracks (Safari / supported browser)
+    const nativeTracks = this.subtitleManager.getAvailableNativeAudioTracks();
+    if (nativeTracks.length > 0) {
+      nativeTracks.forEach((t) => {
         const opt = document.createElement('option');
-        opt.value = t.index.toString();
+        opt.value = `native_${t.index}`;
         opt.textContent = `${t.label} (${t.language})`;
         if (t.enabled) opt.selected = true;
         this.audioSelectEl.appendChild(opt);
       });
+    } else if (inspection && inspection.audioTracks.length > 0) {
+      // 2. Container detected tracks from MKV / MP4
+      inspection.audioTracks.forEach((t) => {
+        const opt = document.createElement('option');
+        opt.value = `info_${t.trackNumber}`;
+        const chStr = t.channels === 6 ? ' 5.1ch' : (t.channels === 2 ? ' Stereo' : ` ${t.channels}ch`);
+        opt.textContent = `Track ${t.trackNumber}: ${t.name} [${t.codec}${chStr}]`;
+        this.audioSelectEl.appendChild(opt);
+      });
     }
+
+    // 3. Load External Audio Option
+    const loadOpt = document.createElement('option');
+    loadOpt.value = 'load';
+    loadOpt.textContent = '+ Load External Audio File (.mp3, .m4a, .aac)...';
+    this.audioSelectEl.appendChild(loadOpt);
+  }
+
+  private updateAudioSelectWithExternal(filename: string): void {
+    let extOpt = this.audioSelectEl.querySelector('option[value="external"]') as HTMLOptionElement;
+    if (!extOpt) {
+      extOpt = document.createElement('option');
+      extOpt.value = 'external';
+      this.audioSelectEl.insertBefore(extOpt, this.audioSelectEl.firstChild);
+    }
+    extOpt.textContent = `✔ ${filename} (External Track)`;
+    extOpt.selected = true;
   }
 
   public async loadVideoFile(file: File): Promise<void> {
@@ -439,6 +499,28 @@ export class VideoPlayerComponent {
     const objectUrl = URL.createObjectURL(file);
     this.video.src = objectUrl;
     this.dropzone.style.display = 'none';
+
+    // Inspect container audio tracks and multi-channel configuration
+    const inspection = await this.subtitleManager.inspectVideoFile(file);
+    if (inspection.hasMultiChannel) {
+      this.downmixBtn.textContent = '🎚 5.1 Downmix [ON]';
+      this.downmixBtn.style.color = '#008000';
+      this.callbacks.onLog(`[Audio] 6-channel 5.1 audio detected in ${file.name}. Stereo downmixing auto-enabled.`);
+      this.callbacks.onAnnounce('6-channel 5.1 audio detected. Stereo downmixer enabled.');
+    } else {
+      this.downmixBtn.textContent = '🎚 5.1 Downmix';
+      this.downmixBtn.style.color = '';
+    }
+
+    if (inspection.hasUnsupportedAudio) {
+      const codecs = inspection.audioTracks.map((t) => t.codec).join(', ');
+      this.callbacks.onLog(
+        `[Audio Warning] MKV contains ${codecs} which browsers often lack decoders for. If no sound plays, attach an audio track via "+ Load External Audio File".`,
+        'warn'
+      );
+    }
+
+    this.refreshAudioTrackOptions(inspection);
 
     const duration = await extractVideoDuration(this.video);
     const fp = await computeVideoFingerprint(file, duration);
@@ -455,7 +537,6 @@ export class VideoPlayerComponent {
 
   public triggerPlayPauseAction(): void {
     if (this.countdownTimer) {
-      // Abort countdown if active
       this.cancelCountdown();
       this.callbacks.onUserPauseRequest();
       return;
@@ -474,44 +555,13 @@ export class VideoPlayerComponent {
 
     let lastBeepSec = -1;
 
-    const playPleasantBeep = (freq: number, durationSec = 0.22) => {
-      try {
-        const audioCtx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
-        const osc = audioCtx.createOscillator();
-        const gain = audioCtx.createGain();
-
-        osc.type = 'sine'; // warm, pleasant pure tone
-        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-
-        const now = audioCtx.currentTime;
-        gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(0.08, now + 0.02); // soft attack
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + durationSec); // smooth release
-
-        osc.connect(gain);
-        gain.connect(audioCtx.destination);
-        osc.start(now);
-        osc.stop(now + durationSec + 0.05);
-      } catch {
-        // audio optional
-      }
-    };
-
-    const updateCountdown = () => {
-      const remainingMs = targetStartTime - Date.now();
+    const tick = () => {
+      const now = Date.now();
+      const remainingMs = targetStartTime - now;
 
       if (remainingMs <= 0) {
-        this.countdownNumberEl.textContent = 'PLAY!';
-        if (lastBeepSec !== 0) {
-          lastBeepSec = 0;
-          playPleasantBeep(784.0, 0.3); // G5 warm resolve chime
-        }
-
-        setTimeout(() => {
-          this.countdownOverlay.style.display = 'none';
-        }, 350);
-
         this.cancelCountdown();
+        this.playSoftBeep(784, 0.2); // G5 resolve
         onComplete();
         return;
       }
@@ -519,44 +569,71 @@ export class VideoPlayerComponent {
       const sec = Math.ceil(remainingMs / 1000);
       this.countdownNumberEl.textContent = sec.toString();
 
-      // Emit exactly one pleasant chime beep per countdown second (3, 2, 1)
-      if (sec !== lastBeepSec && sec <= 3 && sec >= 1) {
+      if (sec !== lastBeepSec && sec >= 1 && sec <= 3) {
         lastBeepSec = sec;
-        if (sec === 3) playPleasantBeep(523.25, 0.2); // C5
-        else if (sec === 2) playPleasantBeep(587.33, 0.2); // D5
-        else if (sec === 1) playPleasantBeep(659.25, 0.25); // E5
+        const freqs = [523.25, 587.33, 659.25]; // C5, D5, E5
+        const f = freqs[3 - sec] || 523.25;
+        this.playSoftBeep(f, 0.08);
       }
+
+      this.countdownTimer = window.requestAnimationFrame(tick);
     };
 
-    updateCountdown();
-    this.countdownTimer = window.setInterval(updateCountdown, 100);
+    tick();
   }
 
   public cancelCountdown(): void {
     if (this.countdownTimer) {
-      clearInterval(this.countdownTimer);
+      window.cancelAnimationFrame(this.countdownTimer);
       this.countdownTimer = null;
     }
     this.countdownOverlay.style.display = 'none';
   }
 
+  private playSoftBeep(freq: number, duration: number): void {
+    try {
+      const AudioCtxClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtxClass) return;
+      const ctx = new AudioCtxClass();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, ctx.currentTime);
+
+      gain.gain.setValueAtTime(0.001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start();
+      osc.stop(ctx.currentTime + duration + 0.02);
+    } catch {
+      // AudioContext unavailable
+    }
+  }
+
   // ================= Pause Banner Overlay =================
 
-  public showPauseBanner(message: string): void {
-    this.pauseBannerTextEl.textContent = message;
-    this.pauseBannerOverlay.style.display = 'flex';
+  public showPauseBanner(text: string): void {
+    this.pauseBannerTextEl.textContent = text;
+    this.pauseBannerOverlay.style.display = 'block';
   }
 
   public hidePauseBanner(): void {
     this.pauseBannerOverlay.style.display = 'none';
   }
 
-  // ================= Keyboard & Player Controls =================
+  // ================= Media Controls Helper Methods =================
 
   public seekRelative(seconds: number): void {
-    if (!this.video) return;
-    const newTime = Math.max(0, Math.min(this.video.duration || 0, this.video.currentTime + seconds));
-    this.video.currentTime = newTime;
+    if (isNaN(this.video.duration)) return;
+    const target = Math.max(0, Math.min(this.video.duration, this.video.currentTime + seconds));
+    this.video.currentTime = target;
+    this.callbacks.onUserSeek(target);
+    this.callbacks.onAnnounce(`Seek ${seconds > 0 ? '+' : ''}${seconds} seconds`);
   }
 
   public adjustVolume(delta: number): void {
@@ -564,19 +641,19 @@ export class VideoPlayerComponent {
     this.video.volume = newVol;
     this.volumeSlider.value = newVol.toString();
     this.video.muted = false;
-    this.updateVolumeUI();
+    this.updateMuteButtonIcon();
+    this.callbacks.onAnnounce(`Volume ${Math.round(newVol * 100)} percent`);
   }
 
   public toggleMute(): void {
     this.video.muted = !this.video.muted;
-    this.updateVolumeUI();
+    this.updateMuteButtonIcon();
+    this.callbacks.onAnnounce(this.video.muted ? 'Muted' : 'Unmuted');
   }
 
-  private updateVolumeUI(): void {
+  private updateMuteButtonIcon(): void {
     if (this.video.muted || this.video.volume === 0) {
       this.muteBtn.textContent = '🔇';
-    } else if (this.video.volume < 0.5) {
-      this.muteBtn.textContent = '🔉';
     } else {
       this.muteBtn.textContent = '🔊';
     }
@@ -584,10 +661,24 @@ export class VideoPlayerComponent {
 
   public toggleFullscreen(): void {
     const stage = this.element.querySelector('#stage-container') as HTMLElement;
-    if (!document.fullscreenElement) {
-      stage.requestFullscreen().catch(() => {});
+    const isFs = !!(document.fullscreenElement || (document as unknown as { webkitFullscreenElement?: Element }).webkitFullscreenElement);
+
+    if (!isFs) {
+      if (stage.requestFullscreen) {
+        stage.requestFullscreen().catch(() => {
+          if ((this.video as unknown as { webkitEnterFullscreen?: () => void }).webkitEnterFullscreen) {
+            (this.video as unknown as { webkitEnterFullscreen: () => void }).webkitEnterFullscreen();
+          }
+        });
+      } else if ((this.video as unknown as { webkitEnterFullscreen?: () => void }).webkitEnterFullscreen) {
+        (this.video as unknown as { webkitEnterFullscreen: () => void }).webkitEnterFullscreen();
+      }
     } else {
-      document.exitFullscreen().catch(() => {});
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(() => {});
+      } else if ((document as unknown as { webkitExitFullscreen?: () => void }).webkitExitFullscreen) {
+        (document as unknown as { webkitExitFullscreen: () => void }).webkitExitFullscreen();
+      }
     }
   }
 
@@ -603,10 +694,9 @@ export class VideoPlayerComponent {
     const mins = Math.floor((sec % 3600) / 60);
     const secs = Math.floor(sec % 60);
 
-    const pad = (n: number) => n.toString().padStart(2, '0');
     if (hours > 0) {
-      return `${pad(hours)}:${pad(mins)}:${pad(secs)}`;
+      return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     }
-    return `${pad(mins)}:${pad(secs)}`;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   }
 }
