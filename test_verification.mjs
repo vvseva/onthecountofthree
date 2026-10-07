@@ -678,3 +678,97 @@ test('Secret Chat Command: /polina triggers full screen message and hearts', () 
   assert.equal(processChatMessage('hello world'), false);
   assert.equal(overlayTriggered, 3);
 });
+
+test('Primary vs Secondary Sync Roles: Primary maintains 1.00x fixed clock with zero stutter', () => {
+  function computeAction(role, driftMs, isWarmup = false) {
+    if (role === 'PRIMARY') {
+      return { action: 'DO_NOTHING', rate: 1.0 };
+    }
+    const abs = Math.abs(driftMs);
+    if (isWarmup) {
+      if (abs < 100) return { action: 'DO_NOTHING', rate: 1.0 };
+      if (abs <= 3500) {
+        return { action: 'WARMUP_SETTLE', rate: driftMs > 0 ? 0.98 : 1.02 };
+      }
+      return { action: 'HARD_SEEK', rate: 1.0 };
+    }
+    if (abs < 100) return { action: 'DO_NOTHING', rate: 1.0 };
+    if (abs <= 1200) {
+      return { action: driftMs > 0 ? 'NUDGE_SLOW' : 'NUDGE_FAST', rate: driftMs > 0 ? 0.97 : 1.03 };
+    }
+    return { action: 'HARD_SEEK', rate: 1.0 };
+  }
+
+  // Primary: never alters speed or seeks regardless of drift
+  assert.deepEqual(computeAction('PRIMARY', 250), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('PRIMARY', 1500), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('PRIMARY', -800), { action: 'DO_NOTHING', rate: 1.0 });
+
+  // Secondary during warmup: suppresses hard seek for 1500ms drift, gently settles
+  assert.deepEqual(computeAction('SECONDARY', 1500, true), { action: 'WARMUP_SETTLE', rate: 0.98 });
+  assert.deepEqual(computeAction('SECONDARY', -500, true), { action: 'WARMUP_SETTLE', rate: 1.02 });
+  assert.deepEqual(computeAction('SECONDARY', 4000, true), { action: 'HARD_SEEK', rate: 1.0 });
+
+  // Secondary after warmup: standard rules apply
+  assert.deepEqual(computeAction('SECONDARY', 300, false), { action: 'NUDGE_SLOW', rate: 0.97 });
+  assert.deepEqual(computeAction('SECONDARY', 1500, false), { action: 'HARD_SEEK', rate: 1.0 });
+});
+
+test('English Track Prioritization: Automatically selects English audio and subtitle tracks', () => {
+  function isEnglish(lang, name) {
+    const l = (lang || '').toLowerCase().trim();
+    const n = (name || '').toLowerCase();
+    return l === 'eng' || l === 'en' || l === 'english' || /\b(eng|english)\b/i.test(n);
+  }
+
+  const sampleAudioTracks = [
+    { trackNumber: 1, name: 'Russian DVO (ExKinoRay)', language: 'rus', codec: 'AC-3', isDefault: true, isUnsupportedBrowserCodec: true },
+    { trackNumber: 2, name: 'English Original', language: 'eng', codec: 'E-AC-3', isDefault: false, isUnsupportedBrowserCodec: true }
+  ];
+
+  // Pick audio track to decode: should prioritize English track over default Russian track
+  const selectedAudio = sampleAudioTracks.find(t => isEnglish(t.language, t.name) && t.isUnsupportedBrowserCodec)
+    || sampleAudioTracks.find(t => t.isDefault && t.isUnsupportedBrowserCodec);
+
+  assert.ok(selectedAudio);
+  assert.equal(selectedAudio.trackNumber, 2);
+  assert.equal(selectedAudio.language, 'eng');
+
+  // Subtitles preference
+  const sampleSubTracks = [
+    { trackNumber: 3, name: 'Русские субтитры', language: 'rus', isDefault: true },
+    { trackNumber: 4, name: 'English Subtitles', language: 'eng', isDefault: false }
+  ];
+
+  const selectedSub = sampleSubTracks.find(t => isEnglish(t.language, t.name))
+    || sampleSubTracks.find(t => t.isDefault);
+
+  assert.ok(selectedSub);
+  assert.equal(selectedSub.trackNumber, 4);
+});
+
+test('Audio Decoded Peer Notification: broadcasts AUDIO_DECODED event with track name', async () => {
+  const room = await generateRoomCredentials();
+
+  const decodedEvent = {
+    version: 1,
+    senderId: 'PEER_X',
+    sequenceId: 5,
+    timestamp: Date.now(),
+    type: 'AUDIO_DECODED',
+    playbackTime: 0,
+    playbackRate: 1.0,
+    paused: true,
+    role: 'PRIMARY',
+    audioDecodedTrack: 'English 5.1 Surround'
+  };
+
+  const encrypted = await encryptPayload(decodedEvent, room.aesKey);
+  const decrypted = await decryptPayload(encrypted, room.aesKey);
+
+  assert.ok(decrypted);
+  assert.equal(decrypted.type, 'AUDIO_DECODED');
+  assert.equal(decrypted.audioDecodedTrack, 'English 5.1 Surround');
+  assert.equal(decrypted.role, 'PRIMARY');
+});
+

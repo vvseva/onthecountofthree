@@ -182,24 +182,31 @@ export class DiagnosticsComponent {
     manualOffsetSec: number;
     peerTimeSec: number;
     localTimeSec: number;
+    role?: 'PRIMARY' | 'SECONDARY';
   }): void {
     this.rttValEl.textContent = stats.rttMs > 0 ? `${stats.rttMs} ms` : '-- ms';
 
-    const absDrift = Math.abs(stats.driftMs);
-    let driftLabel = `${stats.driftMs > 0 ? '+' : ''}${stats.driftMs} ms`;
-    if (absDrift < 100) {
-      driftLabel += ' (In Sync)';
+    if (stats.role === 'PRIMARY') {
+      this.driftValEl.textContent = '0 ms (Primary: Master Clock)';
       this.driftValEl.style.color = '#008000';
-    } else if (absDrift <= 1200) {
-      driftLabel += ' (Nudging)';
-      this.driftValEl.style.color = '#ff8800';
+      this.rateValEl.textContent = '1.00x (Fixed)';
     } else {
-      driftLabel += ' (Hard Seeking)';
-      this.driftValEl.style.color = '#ff0000';
+      const absDrift = Math.abs(stats.driftMs);
+      let driftLabel = `${stats.driftMs > 0 ? '+' : ''}${stats.driftMs} ms`;
+      if (absDrift < 100) {
+        driftLabel += ' (In Sync)';
+        this.driftValEl.style.color = '#008000';
+      } else if (absDrift <= 1200) {
+        driftLabel += ' (Nudging)';
+        this.driftValEl.style.color = '#ff8800';
+      } else {
+        driftLabel += ' (Hard Seeking)';
+        this.driftValEl.style.color = '#ff0000';
+      }
+      this.driftValEl.textContent = driftLabel;
+      this.rateValEl.textContent = `${stats.currentRate.toFixed(2)}x`;
     }
-    this.driftValEl.textContent = driftLabel;
 
-    this.rateValEl.textContent = `${stats.currentRate.toFixed(2)}x`;
     this.peerTimeValEl.textContent = this.formatTime(stats.peerTimeSec);
   }
 

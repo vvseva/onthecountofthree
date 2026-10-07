@@ -46,7 +46,9 @@ async function bootstrapApp() {
   const toastManager = new ToastNotificationManager();
 
   // 2. Cryptographic credentials (from hash or freshly generated)
-  let credentials: RoomCredentials = (await parseCredentialsFromHash()) || (await generateRoomCredentials());
+  const hashCredentials = await parseCredentialsFromHash();
+  const isHost = !hashCredentials;
+  let credentials: RoomCredentials = hashCredentials || (await generateRoomCredentials());
   setUrlHash(credentials.roomId, credentials.keyBase64);
 
   // 3. Ephemeral Nostr Identity (in-memory throwaway keypair)
@@ -57,7 +59,20 @@ async function bootstrapApp() {
   const pairingService = new PairingCodeService(relayPool);
 
   // 5. Initialize UI Components
-  const badgesBar = new BadgesBar();
+  const badgesBar = new BadgesBar({
+    onToggleRole: () => {
+      const newRole = syncEngine.toggleRole();
+      badgesBar.updateRole(newRole);
+      toastManager.show({
+        title: 'Role Changed',
+        message: `You are now <strong>${newRole === 'PRIMARY' ? 'Primary (Master Clock)' : 'Secondary (Follower)'}</strong>.<br><small>${newRole === 'PRIMARY' ? 'Your video plays at steady 1.00x speed without speed/seek stutter.' : 'Your video gently syncs with the Primary clock.'}</small>`,
+        icon: newRole === 'PRIMARY' ? '👑' : '🎧',
+        type: 'info',
+        durationMs: 4000
+      });
+      announcer.announce(`Switched sync role to ${newRole === 'PRIMARY' ? 'Primary Master Clock' : 'Secondary Follower'}`);
+    }
+  });
 
   const diagnostics = new DiagnosticsComponent({
     onAddRelay: (url) => {
@@ -99,7 +114,9 @@ async function bootstrapApp() {
       credentials = await generateRoomCredentials();
       setUrlHash(credentials.roomId, credentials.keyBase64);
       roomBar.updateCredentials(credentials.roomId, credentials.keyBase64);
+      syncEngine.setIsHost(true);
       syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
+      badgesBar.updateRole('PRIMARY');
       announcer.announce('Created new encrypted room.');
       diagnostics.appendLog(`[Room] Generated fresh Room ID ${credentials.roomId}`);
     },
@@ -215,10 +232,35 @@ async function bootstrapApp() {
     onPauseWithDetails: (pausedBy, timeSec) => {
       const bannerMsg = `Paused by ${pausedBy === 'You' ? 'You' : `Peer ${pausedBy.slice(0, 4)}`} at ${formatTime(timeSec)}`;
       videoPlayer.showPauseBanner(bannerMsg);
+    },
+    onRoleChange: (role, triggeredByPeer) => {
+      badgesBar.updateRole(role);
+      if (triggeredByPeer) {
+        toastManager.show({
+          title: 'Role Updated',
+          message: `Peer updated sync roles. You are now <strong>${role === 'PRIMARY' ? 'Primary (Master Clock)' : 'Secondary (Follower)'}</strong>.`,
+          icon: role === 'PRIMARY' ? '👑' : '🎧',
+          type: 'info',
+          durationMs: 4000
+        });
+        announcer.announce(`Role updated: You are ${role === 'PRIMARY' ? 'Primary Master Clock' : 'Secondary Follower'}`);
+      }
+    },
+    onPeerAudioDecoded: (peerId, trackName) => {
+      toastManager.show({
+        title: 'Peer Audio Ready',
+        message: `Peer <strong>${peerId.slice(0, 4)}</strong> finished decoding audio track: <em>${trackName}</em>.<br><small>Both sides are ready for synchronized playback!</small>`,
+        icon: '🎧',
+        type: 'info',
+        durationMs: 5000
+      });
+      announcer.announce(`Peer finished decoding audio: ${trackName}`);
     }
   });
 
-  // Supply active room credentials to sync engine
+  // Supply active room credentials and initial role to sync engine
+  syncEngine.setIsHost(isHost);
+  badgesBar.updateRole(syncEngine.getRole());
   syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
   roomBar.updateCredentials(credentials.roomId, credentials.keyBase64);
 
@@ -256,6 +298,9 @@ async function bootstrapApp() {
     },
     onAnnounce: (msg) => {
       announcer.announce(msg);
+    },
+    onAudioDecoded: (trackName) => {
+      syncEngine.broadcastAudioDecoded(trackName);
     }
   });
 

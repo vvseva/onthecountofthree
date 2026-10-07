@@ -4,7 +4,11 @@
  * (Verbose fingerprint and E2EE details are tucked into System Diagnostics).
  */
 
-import { RelayStatus, PeerState } from '../../types';
+import { RelayStatus, PeerState, SyncRole } from '../../types';
+
+export interface BadgesBarCallbacks {
+  onToggleRole?: () => void;
+}
 
 export class BadgesBar {
   private element: HTMLElement;
@@ -12,8 +16,13 @@ export class BadgesBar {
   private connectionText: HTMLElement;
   private peerDot: HTMLElement;
   private peerText: HTMLElement;
+  private roleBadgeEl: HTMLElement;
+  private roleDot: HTMLElement;
+  private roleText: HTMLElement;
+  private callbacks?: BadgesBarCallbacks;
 
-  constructor() {
+  constructor(callbacks?: BadgesBarCallbacks) {
+    this.callbacks = callbacks;
     this.element = document.createElement('div');
     this.element.className = 'badge-bar';
     this.element.setAttribute('role', 'region');
@@ -29,16 +38,40 @@ export class BadgesBar {
         <span class="badge-dot gray" id="dot-peer"></span>
         <span id="text-peer">WAITING FOR PEER</span>
       </div>
+
+      <div class="badge-item role-badge clickable" id="badge-role" style="cursor: pointer;" title="Sync Role: Click to switch between Primary (Master Clock) and Secondary (Follower)">
+        <span class="badge-dot yellow" id="dot-role"></span>
+        <span id="text-role">👑 PRIMARY (CLOCK)</span>
+      </div>
     `;
 
     this.connectionDot = this.element.querySelector('#dot-conn')!;
     this.connectionText = this.element.querySelector('#text-conn')!;
     this.peerDot = this.element.querySelector('#dot-peer')!;
     this.peerText = this.element.querySelector('#text-peer')!;
+    this.roleBadgeEl = this.element.querySelector('#badge-role')!;
+    this.roleDot = this.element.querySelector('#dot-role')!;
+    this.roleText = this.element.querySelector('#text-role')!;
+
+    this.roleBadgeEl.addEventListener('click', () => {
+      this.callbacks?.onToggleRole?.();
+    });
   }
 
   public getElement(): HTMLElement {
     return this.element;
+  }
+
+  public updateRole(role: SyncRole): void {
+    if (role === 'PRIMARY') {
+      this.roleDot.className = 'badge-dot yellow';
+      this.roleText.textContent = '👑 PRIMARY (CLOCK)';
+      this.roleBadgeEl.title = 'Sync Role: Primary (Master Clock) — Your video plays at uninterrupted 1.00x speed without speed/seek stutter. Click to switch to Follower.';
+    } else {
+      this.roleDot.className = 'badge-dot blue';
+      this.roleText.textContent = '🎧 SECONDARY (FOLLOWER)';
+      this.roleBadgeEl.title = 'Sync Role: Secondary (Follower) — Your video gently stays in sync with Primary. Click to switch to Master Clock.';
+    }
   }
 
   public updateRelayStatuses(relays: RelayStatus[]): void {
@@ -64,7 +97,9 @@ export class BadgesBar {
     } else {
       this.peerDot.className = 'badge-dot green';
       const rttStr = peer.rttMs > 0 ? ` [RTT: ${peer.rttMs}ms]` : '';
-      this.peerText.textContent = `1 PEER ONLINE (${peer.peerId})${rttStr}`;
+      const audioStr = peer.isAudioDecoded ? ' [🎧 Audio Ready]' : '';
+      this.peerText.textContent = `1 PEER ONLINE (${peer.peerId})${rttStr}${audioStr}`;
     }
   }
 }
+

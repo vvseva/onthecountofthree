@@ -131,7 +131,7 @@ function inspectMatroskaTracks(buffer: Uint8Array): DetectedAudioTrack[] {
             trackName = new TextDecoder().decode(strBytes).replace(/\0/g, '');
             pos += len.value;
           }
-        } else if (id === 0x22 && buffer[pos] === 0xB5 && buffer[pos + 1] === 0x9C) { // Language (0x22B59C)
+        } else if (id === 0x22 && buffer[pos] === 0xB5 && (buffer[pos + 1] === 0x9C || buffer[pos + 1] === 0x9D)) { // Language (0x22B59C or 0x22B59D)
           pos += 2;
           const len = readEbmlVint(buffer, pos);
           if (len) {

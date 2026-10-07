@@ -3,7 +3,7 @@
  * State machine handling PLAY, PAUSE, SEEK, PING, PONG, and dynamic drift correction.
  */
 
-import { SyncPayload, SyncEventType, PeerState, FingerprintMatchStatus, ChatMessagePayload } from '../types';
+import { SyncPayload, SyncEventType, SyncRole, PeerState, FingerprintMatchStatus, ChatMessagePayload } from '../types';
 import { NostrRelayPool } from '../network/relayPool';
 import { NostrIdentity, signEphemeralSyncEvent } from '../network/nostrIdentity';
 import { encryptPayload, decryptPayload } from '../crypto/e2ee';
@@ -20,12 +20,15 @@ export interface SyncEngineCallbacks {
     manualOffsetSec: number;
     peerTimeSec: number;
     localTimeSec: number;
+    role: SyncRole;
   }) => void;
   onLog: (msg: string, level?: 'info' | 'warn' | 'error') => void;
   onCountdownStart: (targetStartTime: number) => void;
   onCountdownAbort: () => void;
   onChatMessage: (msg: ChatMessagePayload, isSelf: boolean) => void;
   onPauseWithDetails: (pausedBy: string, timeSec: number) => void;
+  onRoleChange?: (role: SyncRole, triggeredByPeer: boolean) => void;
+  onPeerAudioDecoded?: (peerId: string, trackName: string) => void;
 }
 
 export class SyncEngine {
@@ -38,6 +41,9 @@ export class SyncEngine {
   private sequenceId = 0;
   private manualOffset = 0; // seconds (-2.0 to +2.0)
   private localFingerprint: string | null = null;
+  private role: SyncRole = 'PRIMARY';
+  private isHost = false;
+  private lastPlayStartTime = 0;
 
   private isApplyingRemoteUpdate = false;
   private pingIntervalTimer: number | null = null;
@@ -131,6 +137,7 @@ export class SyncEngine {
 
   private handleLocalPlay = (): void => {
     if (this.isApplyingRemoteUpdate) return;
+    this.lastPlayStartTime = Date.now();
     this.callbacks.onLog('[Local] User pressed Play');
     this.broadcastEvent('PLAY');
     this.callbacks.onAnnounceMessage('Playback started');
@@ -165,6 +172,7 @@ export class SyncEngine {
       targetStartTime?: number;
       chatMessage?: ChatMessagePayload;
       pausedBy?: string;
+      audioDecodedTrack?: string;
     }
   ): Promise<void> {
     if (!this.aesKey || !this.hashedRoomTag) return;
@@ -190,7 +198,9 @@ export class SyncEngine {
       echoTimestamp,
       targetStartTime: extra?.targetStartTime,
       chatMessage: extra?.chatMessage,
-      pausedBy: extra?.pausedBy
+      pausedBy: extra?.pausedBy,
+      role: this.role,
+      audioDecodedTrack: extra?.audioDecodedTrack
     };
 
     try {
@@ -230,10 +240,20 @@ export class SyncEngine {
         paused: payload.paused,
         playbackRate: payload.playbackRate,
         rttMs: 0,
-        estimatedClockSkewMs: 0
+        estimatedClockSkewMs: 0,
+        role: payload.role
       };
       this.callbacks.onLog(`[Sync] Peer connected: ${payload.senderId}`);
       this.callbacks.onAnnounceMessage(`Peer connected: ${payload.senderId}`);
+
+      // Automatic tie-breaking for default roles:
+      // If both start as PRIMARY, guest/secondary yields based on senderId comparison
+      if (this.role === 'PRIMARY' && payload.role === 'PRIMARY' && !this.isHost) {
+        if (this.senderId > payload.senderId) {
+          this.setRole('SECONDARY', false);
+          this.callbacks.onLog(`[Sync] Automatic tie-break: Local role elected as SECONDARY (follower).`);
+        }
+      }
     } else {
       this.activePeer.lastSeen = now;
       if (payload.fingerprint) {
@@ -242,6 +262,9 @@ export class SyncEngine {
       this.activePeer.playbackTime = payload.playbackTime;
       this.activePeer.paused = payload.paused;
       this.activePeer.playbackRate = payload.playbackRate;
+      if (payload.role) {
+        this.activePeer.role = payload.role;
+      }
     }
 
     this.updateFingerprintStatus();
@@ -249,6 +272,25 @@ export class SyncEngine {
 
     // Process specific event types
     switch (payload.type) {
+      case 'ROLE_CHANGE':
+        if (payload.role) {
+          // Opposite role to peer to avoid two-way fighting
+          const desiredRole: SyncRole = payload.role === 'PRIMARY' ? 'SECONDARY' : 'PRIMARY';
+          this.setRole(desiredRole, false);
+          this.callbacks.onLog(`[Sync] Peer switched role to ${payload.role}. Local role is now ${desiredRole}.`);
+          this.callbacks.onRoleChange?.(desiredRole, true);
+        }
+        break;
+
+      case 'AUDIO_DECODED':
+        const trackName = payload.audioDecodedTrack || 'Dolby Audio';
+        if (this.activePeer) {
+          this.activePeer.isAudioDecoded = true;
+        }
+        this.callbacks.onLog(`[Audio] Peer finished audio decoding: ${trackName}`);
+        this.callbacks.onPeerAudioDecoded?.(payload.senderId, trackName);
+        break;
+
       case 'PING':
         this.handleRemotePing(payload);
         break;
@@ -272,6 +314,7 @@ export class SyncEngine {
 
       case 'COUNTDOWN_START':
         if (payload.targetStartTime) {
+          this.lastPlayStartTime = payload.targetStartTime;
           this.callbacks.onLog(`[Sync] Peer initiated 3s countdown start at ${this.formatTime(payload.playbackTime)}`);
           this.callbacks.onCountdownStart(payload.targetStartTime);
           if (this.video && Math.abs(this.video.currentTime - payload.playbackTime) > 0.3) {
@@ -299,7 +342,7 @@ export class SyncEngine {
         break;
 
       case 'ANNOUNCE':
-        this.callbacks.onLog(`[Sync] Peer announced state: ${this.formatTime(payload.playbackTime)} (${payload.paused ? 'paused' : 'playing'})`);
+        this.callbacks.onLog(`[Sync] Peer announced state: ${this.formatTime(payload.playbackTime)} (${payload.paused ? 'paused' : 'playing'}, role: ${payload.role || 'default'})`);
         // Immediately reply with a ping to establish bidirectional handshake and compute RTT
         const nonce = Math.random().toString(36).substring(2, 8);
         this.pendingPings.set(nonce, Date.now());
@@ -336,6 +379,7 @@ export class SyncEngine {
   private handleRemotePlay(payload: SyncPayload): void {
     if (!this.video) return;
 
+    this.lastPlayStartTime = Date.now();
     const oneWayLatencySec = (this.activePeer?.rttMs || 100) / 2000;
     const targetTime = payload.playbackTime + (oneWayLatencySec * payload.playbackRate) + this.manualOffset;
 
@@ -407,15 +451,59 @@ export class SyncEngine {
     }
   }
 
+  // ================= Role Management =================
+
+  public setIsHost(isHost: boolean): void {
+    this.isHost = isHost;
+    if (isHost) {
+      this.role = 'PRIMARY';
+    }
+  }
+
+  public setRole(role: SyncRole, broadcast = true): void {
+    const changed = this.role !== role;
+    this.role = role;
+    if (broadcast) {
+      this.broadcastEvent('ROLE_CHANGE');
+    }
+    if (changed) {
+      this.callbacks.onRoleChange?.(role, false);
+    }
+    // If local became PRIMARY, instantly reset playback rate to 1.00x
+    if (role === 'PRIMARY' && this.video && this.video.playbackRate !== 1.0) {
+      this.video.playbackRate = 1.0;
+    }
+  }
+
+  public getRole(): SyncRole {
+    return this.role;
+  }
+
+  public toggleRole(): SyncRole {
+    const nextRole: SyncRole = this.role === 'PRIMARY' ? 'SECONDARY' : 'PRIMARY';
+    this.setRole(nextRole, true);
+    return nextRole;
+  }
+
+  public broadcastAudioDecoded(trackName: string): void {
+    this.callbacks.onLog(`[Audio] Broadcasting audio decoded: ${trackName}`);
+    this.broadcastEvent('AUDIO_DECODED', undefined, undefined, {
+      audioDecodedTrack: trackName
+    });
+  }
+
   // ================= Drift Compensation Engine =================
 
   /**
    * Evaluates drift between local video and peer video:
    * Drift = localCurrentTime - estimatedPeerCurrentTime.
    * Drift Rules:
-   * - |drift| < 100ms: Do nothing (perceptual threshold).
-   * - 100ms <= |drift| <= 1200ms: Soft rate nudge (0.97x - 1.03x).
-   * - |drift| > 1200ms: Hard seek.
+   * - PRIMARY (Master Clock): Plays with zero rate modifications or auto-seeks.
+   * - SECONDARY (Follower):
+   *   * Warmup window (<4.0s after play): suppresses hard seeks, gentle settling.
+   *   * |drift| < 100ms: Do nothing (perceptual threshold).
+   *   * 100ms <= |drift| <= 1200ms: Soft rate nudge (0.97x - 1.03x).
+   *   * |drift| > 1200ms: Hard seek.
    */
   public performDriftCorrection(): void {
     if (!this.video || !this.activePeer) return;
@@ -451,8 +539,21 @@ export class SyncEngine {
       currentRate: this.video.playbackRate,
       manualOffsetSec: this.manualOffset,
       peerTimeSec: targetLocalTime,
-      localTimeSec: localTime
+      localTimeSec: localTime,
+      role: this.role
     });
+
+    // If local is PRIMARY (Master Clock):
+    // PRIMARY NEVER changes rate or auto-seeks to match peer!
+    // Plays completely smoothly at 1.00x constant speed.
+    if (this.role === 'PRIMARY') {
+      if (this.video.playbackRate !== 1.0) {
+        this.video.playbackRate = 1.0;
+      }
+      return;
+    }
+
+    // From here on: Local client is SECONDARY (Follower).
 
     // If local and remote are both paused, match timestamp if discrepancy > 500ms
     if (this.video.paused && this.activePeer.paused) {
@@ -466,12 +567,34 @@ export class SyncEngine {
       return;
     }
 
-    // If one is paused and the other is playing, don't nudge rate; allow user or announce to settle
+    // If one is paused and the other is playing, don't nudge rate; allow user or countdown to settle
     if (this.video.paused !== this.activePeer.paused) {
       return;
     }
 
     const absDriftMs = Math.abs(driftMs);
+
+    // Warmup period: First 4.0 seconds after playback starts
+    // In warmup, prevent hard-seeks unless drift is catastrophic (> 3500ms).
+    // This allows decoder buffers to settle without stuttering!
+    const timeSincePlay = now - this.lastPlayStartTime;
+    const isWarmup = !this.video.paused && timeSincePlay < 4000;
+
+    if (isWarmup) {
+      if (absDriftMs < 100) {
+        if (this.video.playbackRate !== 1.0) this.video.playbackRate = 1.0;
+        return;
+      }
+      if (absDriftMs <= 3500) {
+        // Very gentle rate nudge during warmup
+        const nudgeRate = driftMs > 0 ? 0.98 : 1.02;
+        if (this.video.playbackRate !== nudgeRate) {
+          this.video.playbackRate = nudgeRate;
+          this.callbacks.onLog(`[Sync Warmup] Soft settling: drift ${driftMs > 0 ? '+' : ''}${driftMs}ms, rate ${nudgeRate}x`);
+        }
+        return;
+      }
+    }
 
     // Rule 1: < 100ms: within perceptual threshold
     if (absDriftMs < 100) {

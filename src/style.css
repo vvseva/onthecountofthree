@@ -220,6 +220,18 @@ html, body {
 .badge-dot.yellow { background-color: #ffff00; }
 .badge-dot.red { background-color: #ff2222; }
 .badge-dot.gray { background-color: #999999; }
+.badge-dot.blue { background-color: #0088ff; }
+
+.badge-item.role-badge {
+  user-select: none;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.badge-item.role-badge:hover {
+  background-color: #efede7;
+  border-color: #000080;
+}
 
 /* Room Toolbar */
 .room-bar {

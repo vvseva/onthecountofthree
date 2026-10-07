@@ -1,3 +1,5 @@
+export type SyncRole = 'PRIMARY' | 'SECONDARY';
+
 export type SyncEventType =
   | 'PLAY'
   | 'PAUSE'
@@ -7,7 +9,9 @@ export type SyncEventType =
   | 'ANNOUNCE'
   | 'COUNTDOWN_START'
   | 'COUNTDOWN_ABORT'
-  | 'CHAT_MESSAGE';
+  | 'CHAT_MESSAGE'
+  | 'ROLE_CHANGE'
+  | 'AUDIO_DECODED';
 
 export interface ChatMessagePayload {
   id: string;
@@ -32,6 +36,8 @@ export interface SyncPayload {
   targetStartTime?: number;   // Timestamp for synchronized countdown play
   chatMessage?: ChatMessagePayload;
   pausedBy?: string;          // Identifier of user who initiated pause
+  role?: SyncRole;            // Sync role: PRIMARY (master clock) or SECONDARY (follower)
+  audioDecodedTrack?: string; // Notification of completed audio decode
 }
 
 export type RelayConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR';
@@ -54,6 +60,8 @@ export interface PeerState {
   playbackRate: number;
   rttMs: number;
   estimatedClockSkewMs: number;
+  role?: SyncRole;
+  isAudioDecoded?: boolean;
 }
 
 export type FingerprintMatchStatus = 'NO_LOCAL_FILE' | 'WAITING_FOR_PEER' | 'VERIFIED' | 'MISMATCH';

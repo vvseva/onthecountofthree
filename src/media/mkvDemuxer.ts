@@ -430,7 +430,7 @@ export async function demuxMatroska(file: File): Promise<DemuxResult> {
           codecId = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '');
         } else if (cId.id === 0x536E) {
           trackName = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
-        } else if (cId.id === 0x22B59C) {
+        } else if (cId.id === 0x22B59C || cId.id === 0x22B59D) {
           language = new TextDecoder('utf-8').decode(tracksBuffer.slice(cDataStart, cDataEnd)).replace(/\0/g, '').trim();
         } else if (cId.id === 0xE1) {
           let aPos = cDataStart;

@@ -16,6 +16,7 @@ export interface VideoPlayerCallbacks {
   onUserSeek: (targetTime: number) => void;
   onLog: (msg: string, level?: 'info' | 'warn' | 'error') => void;
   onAnnounce: (msg: string) => void;
+  onAudioDecoded?: (trackName: string) => void;
 }
 
 export class VideoPlayerComponent {
@@ -768,6 +769,12 @@ export class VideoPlayerComponent {
     this.subSelectEl.appendChild(loadOpt);
   }
 
+  private isEnglishTrack(lang?: string, name?: string): boolean {
+    const l = (lang || '').toLowerCase().trim();
+    const n = (name || '').toLowerCase();
+    return l === 'eng' || l === 'en' || l === 'english' || /\b(eng|english)\b/i.test(n);
+  }
+
   private refreshAudioTrackOptions(demux: DemuxResult): void {
     this.audioSelectEl.innerHTML = '';
 
@@ -779,15 +786,21 @@ export class VideoPlayerComponent {
     // 1. Native tracks (Safari / supported browser)
     const nativeTracks = this.subtitleManager.getAvailableNativeAudioTracks();
     if (nativeTracks.length > 0) {
+      const preferredNative = nativeTracks.find((t) => this.isEnglishTrack(t.language, t.label)) || nativeTracks[0];
       nativeTracks.forEach((t) => {
         const opt = document.createElement('option');
         opt.value = `native_${t.index}`;
         opt.textContent = `${t.label} (${t.language})`;
-        if (t.enabled) opt.selected = true;
+        if (t === preferredNative) opt.selected = true;
         this.audioSelectEl.appendChild(opt);
       });
     } else if (demux && demux.audioTracks.length > 0) {
       // 2. Container detected tracks from MKV / MP4
+      const preferredContainer =
+        demux.audioTracks.find((t) => this.isEnglishTrack(t.language, t.name)) ||
+        demux.audioTracks.find((t) => t.isDefault) ||
+        demux.audioTracks[0];
+
       demux.audioTracks.forEach((t) => {
         const opt = document.createElement('option');
         opt.value = `audio_${t.trackNumber}`;
@@ -796,6 +809,9 @@ export class VideoPlayerComponent {
         const badge = t.isUnsupportedBrowserCodec ? ' [Dolby WASM Decode]' : '';
         const defTag = t.isDefault ? ' [Default]' : '';
         opt.textContent = `${t.name}${langStr} [${t.codec}${chStr}]${defTag}${badge}`;
+        if (preferredContainer && t.trackNumber === preferredContainer.trackNumber) {
+          opt.selected = true;
+        }
         this.audioSelectEl.appendChild(opt);
       });
     }
@@ -847,8 +863,11 @@ export class VideoPlayerComponent {
     }
 
     // Auto-decode E-AC-3 / AC-3 audio track if present (solves WEB-DL silence on Chromium)
-    const eac3Track = demux.audioTracks.find((t) => t.isDefault && t.isUnsupportedBrowserCodec)
-      || demux.audioTracks.find((t) => t.isUnsupportedBrowserCodec);
+    // Priority: English Dolby track > Default Dolby track > Any Dolby track
+    const eac3Track =
+      demux.audioTracks.find((t) => this.isEnglishTrack(t.language, t.name) && t.isUnsupportedBrowserCodec) ||
+      demux.audioTracks.find((t) => t.isDefault && t.isUnsupportedBrowserCodec) ||
+      demux.audioTracks.find((t) => t.isUnsupportedBrowserCodec);
 
     if (eac3Track) {
       this.isDecodingAudio = true;
@@ -879,6 +898,9 @@ export class VideoPlayerComponent {
         this.eac3StatusPill.style.color = '#008000';
         this.callbacks.onLog(`[Audio] Dolby Digital audio (${eac3Track.name}) decoded and active!`);
         this.callbacks.onAnnounce(`Dolby Digital audio ready: ${eac3Track.name}`);
+
+        // Broadcast to peer that audio decoding is complete!
+        this.callbacks.onAudioDecoded?.(eac3Track.name || `${eac3Track.codec} Track #${eac3Track.trackNumber}`);
       } catch (err) {
         this.isDecodingAudio = false;
         this.hideDecodingAlertPopup();
@@ -889,15 +911,24 @@ export class VideoPlayerComponent {
     } else {
       this.isDecodingAudio = false;
       this.eac3StatusPill.style.display = 'none';
+
+      // Auto-select English audio track in dropdown if present
+      const englishAudio = demux.audioTracks.find((t) => this.isEnglishTrack(t.language, t.name));
+      if (englishAudio) {
+        const selOpt = this.audioSelectEl.querySelector(`option[value="audio_${englishAudio.trackNumber}"]`) as HTMLOptionElement;
+        if (selOpt) selOpt.selected = true;
+      }
     }
 
-    // If default or forced subtitle track exists, auto-select it
-    const defaultSub = demux.subtitleTracks.find((t) => t.isDefault || t.isForced);
-    if (defaultSub) {
-      const subOpt = this.subSelectEl.querySelector(`option[value="sub_${defaultSub.trackNumber}"]`) as HTMLOptionElement;
+    // Auto-select subtitles: Prefer English subtitle track if present, otherwise default or forced subtitle track
+    const preferredSub =
+      demux.subtitleTracks.find((t) => this.isEnglishTrack(t.language, t.name)) ||
+      demux.subtitleTracks.find((t) => t.isDefault || t.isForced);
+    if (preferredSub) {
+      const subOpt = this.subSelectEl.querySelector(`option[value="sub_${preferredSub.trackNumber}"]`) as HTMLOptionElement;
       if (subOpt) {
         subOpt.selected = true;
-        this.subtitleManager.extractAndApplyEmbeddedSubtitle(defaultSub.trackNumber).then((label) => {
+        this.subtitleManager.extractAndApplyEmbeddedSubtitle(preferredSub.trackNumber).then((label) => {
           (this.element.querySelector('#sub-offset-group') as HTMLElement).style.display = 'flex';
           this.callbacks.onLog(`[Subtitles] Default subtitle track active: ${label}`);
         }).catch(() => {});
