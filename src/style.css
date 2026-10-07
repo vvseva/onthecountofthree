@@ -1827,6 +1827,20 @@ video#sync-video {
   animation: polinaFadeOut 0.35s ease forwards;
 }
 
+/* Warning shake animation when pressing play without a video */
+@keyframes noVideoShake {
+  0%, 100% { transform: translateX(0); }
+  15%, 55% { transform: translateX(-10px); }
+  35%, 75% { transform: translateX(10px); }
+}
+
+.no-video-shake {
+  animation: noVideoShake 0.5s ease-in-out;
+  outline: 3px solid #ff2222 !important;
+  box-shadow: 0 0 15px rgba(255, 34, 34, 0.4) !important;
+}
+
+
 @keyframes polinaFadeIn {
   0% { opacity: 0; }
   100% { opacity: 1; }

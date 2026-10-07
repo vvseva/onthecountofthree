@@ -17,6 +17,7 @@ export interface VideoPlayerCallbacks {
   onLog: (msg: string, level?: 'info' | 'warn' | 'error') => void;
   onAnnounce: (msg: string) => void;
   onAudioDecoded?: (trackName: string) => void;
+  onNoVideoWarning?: () => void;
 }
 
 export class VideoPlayerComponent {
@@ -37,6 +38,7 @@ export class VideoPlayerComponent {
   private toggleControlsBtn: HTMLButtonElement;
   private rateBadge: HTMLElement;
   private fileDetailsBadge: HTMLElement;
+  private hasLoadedVideo = false;
 
   // Overlays
   private countdownOverlay: HTMLElement;
@@ -844,6 +846,7 @@ export class VideoPlayerComponent {
 
     const objectUrl = URL.createObjectURL(file);
     this.video.src = objectUrl;
+    this.hasLoadedVideo = true;
     this.dropzone.style.display = 'none';
 
     // Inspect container audio tracks and subtitles
@@ -956,6 +959,11 @@ export class VideoPlayerComponent {
       return;
     }
 
+    if (!this.hasLoadedVideo) {
+      this.showNoVideoWarning();
+      return;
+    }
+
     if (this.video.paused) {
       if (this.isDecodingAudio) {
         this.showDecodingAlertPopup();
@@ -964,6 +972,21 @@ export class VideoPlayerComponent {
       this.callbacks.onUserPlayRequest(this.isInstantPlayEnabled());
     } else {
       this.callbacks.onUserPauseRequest();
+    }
+  }
+
+  private showNoVideoWarning(): void {
+    this.callbacks.onLog('[Video] Cannot start playback: No video file loaded.', 'warn');
+    this.callbacks.onAnnounce('Warning: No video file loaded. Please select a video file first.');
+    this.callbacks.onNoVideoWarning?.();
+
+    if (this.dropzone) {
+      this.dropzone.classList.remove('no-video-shake');
+      void this.dropzone.offsetWidth; // force DOM reflow
+      this.dropzone.classList.add('no-video-shake');
+      setTimeout(() => {
+        this.dropzone.classList.remove('no-video-shake');
+      }, 1000);
     }
   }
 

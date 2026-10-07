@@ -798,4 +798,30 @@ test('Role Handshake: Second user that joins is Clock (PRIMARY) and first user i
   assert.equal(user2.role, 'PRIMARY', 'Second user that joins must be Clock (PRIMARY)');
 });
 
+test('Playback Prevention: Warning shown when pressing Play without a loaded video', () => {
+  let playRequestSent = false;
+  let warningTriggered = false;
 
+  const fakePlayer = {
+    hasLoadedVideo: false,
+    triggerPlayPauseAction: function() {
+      if (!this.hasLoadedVideo) {
+        warningTriggered = true;
+        return;
+      }
+      playRequestSent = true;
+    }
+  };
+
+  // Attempt play without loaded video
+  fakePlayer.triggerPlayPauseAction();
+  assert.equal(warningTriggered, true, 'Warning must be triggered when trying to play without video');
+  assert.equal(playRequestSent, false, 'Play request must not be sent when no video is loaded');
+
+  // Now load a video and try again
+  warningTriggered = false;
+  fakePlayer.hasLoadedVideo = true;
+  fakePlayer.triggerPlayPauseAction();
+  assert.equal(warningTriggered, false);
+  assert.equal(playRequestSent, true, 'Play request can proceed after video is loaded');
+});

@@ -304,6 +304,16 @@ async function bootstrapApp() {
     },
     onAudioDecoded: (trackName) => {
       syncEngine.broadcastAudioDecoded(trackName);
+    },
+    onNoVideoWarning: () => {
+      toastManager.show({
+        title: 'No Video File Loaded',
+        message: 'Please select or drag-and-drop a local video file (MP4, MKV, WebM) before pressing Play.',
+        icon: '⚠',
+        type: 'warn',
+        durationMs: 4500
+      });
+      announcer.announce('Warning: No video file loaded. Please select a video file first.');
     }
   });
 
