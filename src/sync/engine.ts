@@ -31,6 +31,7 @@ export interface SyncEngineCallbacks {
   onPauseWithDetails: (pausedBy: string, timeSec: number) => void;
   onRoleChange?: (role: SyncRole, triggeredByPeer: boolean) => void;
   onPeerAudioDecoded?: (peerId: string, trackName: string) => void;
+  onRemoteScrub?: (targetTimeSec: number, isScrubbing: boolean) => void;
 }
 
 export class SyncEngine {
@@ -48,6 +49,9 @@ export class SyncEngine {
   private lastPlayStartTime = 0;
 
   private isApplyingRemoteUpdate = false;
+  private isProgrammaticSeek = false;
+  private programmaticSeekTimer: number | null = null;
+  private lastRateChangeTime = 0;
   private pingIntervalTimer: number | null = null;
   private driftCheckTimer: number | null = null;
   private activePeer: PeerState | null = null;
@@ -137,6 +141,17 @@ export class SyncEngine {
 
   // ================= Local Event Handlers =================
 
+  private markProgrammaticSeek(): void {
+    this.isProgrammaticSeek = true;
+    if (this.programmaticSeekTimer !== null) {
+      clearTimeout(this.programmaticSeekTimer);
+    }
+    this.programmaticSeekTimer = window.setTimeout(() => {
+      this.isProgrammaticSeek = false;
+      this.programmaticSeekTimer = null;
+    }, 800);
+  }
+
   private handleLocalPlay = (): void => {
     if (this.isApplyingRemoteUpdate) return;
     this.lastPlayStartTime = Date.now();
@@ -153,7 +168,14 @@ export class SyncEngine {
   };
 
   private handleLocalSeeked = (): void => {
-    if (this.isApplyingRemoteUpdate) return;
+    if (this.isProgrammaticSeek || this.isApplyingRemoteUpdate) {
+      this.isProgrammaticSeek = false;
+      if (this.programmaticSeekTimer !== null) {
+        clearTimeout(this.programmaticSeekTimer);
+        this.programmaticSeekTimer = null;
+      }
+      return;
+    }
     if (!this.video) return;
     this.callbacks.onLog(`[Local] User seeked to ${this.formatTime(this.video.currentTime)}`);
     this.broadcastEvent('SEEK');
@@ -175,12 +197,16 @@ export class SyncEngine {
       chatMessage?: ChatMessagePayload;
       pausedBy?: string;
       audioDecodedTrack?: string;
+      isScrubbing?: boolean;
+      scrubTargetTime?: number;
     }
   ): Promise<void> {
     if (!this.aesKey || !this.hashedRoomTag) return;
 
     this.sequenceId++;
-    const currentTime = this.video ? this.video.currentTime : 0;
+    const currentTime = extra?.scrubTargetTime !== undefined
+      ? extra.scrubTargetTime
+      : (this.video ? this.video.currentTime : 0);
     const paused = this.video ? this.video.paused : true;
     const playbackRate = this.video ? this.video.playbackRate : 1.0;
     const duration = this.video && !isNaN(this.video.duration) ? this.video.duration : 0;
@@ -202,7 +228,8 @@ export class SyncEngine {
       chatMessage: extra?.chatMessage,
       pausedBy: extra?.pausedBy,
       role: this.role,
-      audioDecodedTrack: extra?.audioDecodedTrack
+      audioDecodedTrack: extra?.audioDecodedTrack,
+      isScrubbing: extra?.isScrubbing
     };
 
     try {
@@ -248,19 +275,13 @@ export class SyncEngine {
       this.callbacks.onLog(`[Sync] Peer connected: ${payload.senderId}`);
       this.callbacks.onAnnounceMessage(`Peer connected: ${payload.senderId}`);
 
-      // Role Assignment: The second user that joins is Clock (PRIMARY), and the first user (host) becomes Follower (SECONDARY)
-      if (this.isHost) {
-        if (this.role !== 'SECONDARY') {
-          this.setRole('SECONDARY', false);
-          this.callbacks.onLog('[Sync] Second user joined room: Local (User 1) is SECONDARY (follower), Peer (User 2) is PRIMARY (clock).');
-          this.callbacks.onRoleChange?.('SECONDARY', true);
-        }
-      } else {
-        if (this.role !== 'PRIMARY') {
-          this.setRole('PRIMARY', false);
-          this.callbacks.onLog('[Sync] Joined room as second user: Local is PRIMARY (clock), Peer is SECONDARY (follower).');
-          this.callbacks.onRoleChange?.('PRIMARY', true);
-        }
+      // Role Handshake:
+      // Host is PRIMARY (Master Clock), Guest is SECONDARY (Follower).
+      // If both advertise PRIMARY, non-host yields to SECONDARY.
+      if (!this.isHost && this.role === 'PRIMARY' && payload.role === 'PRIMARY') {
+        this.setRole('SECONDARY', false);
+        this.callbacks.onLog('[Sync] Peer is Room Host (Master Clock). Local elected SECONDARY (Follower).');
+        this.callbacks.onRoleChange?.('SECONDARY', true);
       }
     } else {
       this.activePeer.lastSeen = now;
@@ -320,15 +341,28 @@ export class SyncEngine {
         this.handleRemoteSeek(payload);
         break;
 
+      case 'SCRUB':
+        const scrubTime = payload.playbackTime + this.manualOffset;
+        this.callbacks.onRemoteScrub?.(scrubTime, !!payload.isScrubbing);
+        if (!payload.isScrubbing && this.video) {
+          this.markProgrammaticSeek();
+          this.isApplyingRemoteUpdate = true;
+          this.video.currentTime = Math.max(0, scrubTime);
+          setTimeout(() => { this.isApplyingRemoteUpdate = false; }, 120);
+        }
+        break;
+
       case 'COUNTDOWN_START':
         if (payload.targetStartTime) {
           this.lastPlayStartTime = payload.targetStartTime;
           this.callbacks.onLog(`[Sync] Peer initiated 3s countdown start at ${this.formatTime(payload.playbackTime)}`);
           this.callbacks.onCountdownStart(payload.targetStartTime);
           if (this.video && Math.abs(this.video.currentTime - payload.playbackTime) > 0.3) {
+            this.markProgrammaticSeek();
             this.isApplyingRemoteUpdate = true;
             this.video.currentTime = Math.max(0, payload.playbackTime + this.manualOffset);
-            setTimeout(() => { this.isApplyingRemoteUpdate = false; }, 80);
+            this.callbacks.onRemoteScrub?.(this.video.currentTime, false);
+            setTimeout(() => { this.isApplyingRemoteUpdate = false; }, 120);
           }
         }
         break;
@@ -387,6 +421,11 @@ export class SyncEngine {
   private handleRemotePlay(payload: SyncPayload): void {
     if (!this.video) return;
 
+    // Suppress redundant play packet if synchronized countdown completed within last 2.0s
+    if (Date.now() - this.lastPlayStartTime < 2000 && !this.video.paused) {
+      return;
+    }
+
     this.lastPlayStartTime = Date.now();
     const oneWayLatencySec = (this.activePeer?.rttMs || 100) / 2000;
     const targetTime = payload.playbackTime + (oneWayLatencySec * payload.playbackRate) + this.manualOffset;
@@ -396,7 +435,8 @@ export class SyncEngine {
 
     this.isApplyingRemoteUpdate = true;
     try {
-      if (Math.abs(this.video.currentTime - targetTime) > 0.3) {
+      if (Math.abs(this.video.currentTime - targetTime) > 0.5) {
+        this.markProgrammaticSeek();
         this.video.currentTime = Math.max(0, targetTime);
       }
       this.video.playbackRate = 1.0;
@@ -411,7 +451,7 @@ export class SyncEngine {
       // Small timeout to allow browser video event queue to settle
       setTimeout(() => {
         this.isApplyingRemoteUpdate = false;
-      }, 100);
+      }, 120);
     }
   }
 
@@ -426,13 +466,15 @@ export class SyncEngine {
     try {
       this.video.pause();
       if (Math.abs(this.video.currentTime - targetTime) > 0.3) {
+        this.markProgrammaticSeek();
         this.video.currentTime = Math.max(0, targetTime);
+        this.callbacks.onRemoteScrub?.(targetTime, false);
       }
       this.video.playbackRate = 1.0;
     } finally {
       setTimeout(() => {
         this.isApplyingRemoteUpdate = false;
-      }, 100);
+      }, 120);
     }
   }
 
@@ -442,7 +484,9 @@ export class SyncEngine {
     const targetTime = payload.playbackTime + this.manualOffset;
     this.callbacks.onLog(`[Remote] Peer seeked to ${this.formatTime(targetTime)}`);
     this.callbacks.onAnnounceMessage(`Peer seeked to ${this.formatTime(targetTime)}`);
+    this.callbacks.onRemoteScrub?.(targetTime, false);
 
+    this.markProgrammaticSeek();
     this.isApplyingRemoteUpdate = true;
     try {
       this.video.currentTime = Math.max(0, targetTime);
@@ -455,7 +499,7 @@ export class SyncEngine {
     } finally {
       setTimeout(() => {
         this.isApplyingRemoteUpdate = false;
-      }, 100);
+      }, 120);
     }
   }
 
@@ -463,8 +507,8 @@ export class SyncEngine {
 
   public setIsHost(isHost: boolean): void {
     this.isHost = isHost;
-    // The second user that joins is Clock (PRIMARY), and the first user (host) becomes Follower (SECONDARY)
-    this.role = isHost ? 'SECONDARY' : 'PRIMARY';
+    // Host is PRIMARY (Master Clock), Guest is SECONDARY (Follower)
+    this.role = isHost ? 'PRIMARY' : 'SECONDARY';
   }
 
   public setRole(role: SyncRole, broadcast = true): void {
@@ -565,11 +609,13 @@ export class SyncEngine {
     // If local and remote are both paused, match timestamp if discrepancy > 500ms
     if (this.video.paused && this.activePeer.paused) {
       if (Math.abs(driftSec) > 0.5) {
+        this.markProgrammaticSeek();
         this.isApplyingRemoteUpdate = true;
         this.video.currentTime = Math.max(0, targetLocalTime);
+        this.callbacks.onRemoteScrub?.(targetLocalTime, false);
         setTimeout(() => {
           this.isApplyingRemoteUpdate = false;
-        }, 80);
+        }, 120);
       }
       return;
     }
@@ -582,60 +628,66 @@ export class SyncEngine {
     const absDriftMs = Math.abs(driftMs);
 
     // Warmup period: First 4.0 seconds after playback starts
-    // In warmup, prevent hard-seeks unless drift is catastrophic (> 3500ms).
+    // In warmup, prevent hard-seeks unless drift is catastrophic (> 4000ms).
     // This allows decoder buffers to settle without stuttering!
     const timeSincePlay = now - this.lastPlayStartTime;
     const isWarmup = !this.video.paused && timeSincePlay < 4000;
 
     if (isWarmup) {
-      if (absDriftMs < 100) {
+      if (absDriftMs <= 3500) {
         if (this.video.playbackRate !== 1.0) this.video.playbackRate = 1.0;
         return;
       }
-      if (absDriftMs <= 3500) {
-        // Very gentle rate nudge during warmup
-        const nudgeRate = driftMs > 0 ? 0.98 : 1.02;
-        if (this.video.playbackRate !== nudgeRate) {
-          this.video.playbackRate = nudgeRate;
-          this.callbacks.onLog(`[Sync Warmup] Soft settling: drift ${driftMs > 0 ? '+' : ''}${driftMs}ms, rate ${nudgeRate}x`);
+      if (absDriftMs > 4000) {
+        this.markProgrammaticSeek();
+        this.isApplyingRemoteUpdate = true;
+        try {
+          this.video.currentTime = Math.max(0, targetLocalTime);
+          this.video.playbackRate = 1.0;
+          this.callbacks.onRemoteScrub?.(targetLocalTime, false);
+        } finally {
+          setTimeout(() => {
+            this.isApplyingRemoteUpdate = false;
+          }, 120);
         }
         return;
       }
     }
 
-    // Rule 1: < 100ms: within perceptual threshold
-    if (absDriftMs < 100) {
+    // Rule 1: <= 2000ms: Deadband. Normal minor differences (<=2.0s) MUST NOT
+    // constantly speed up or slow down the video! Stay steady at 1.00x.
+    if (absDriftMs <= 2000) {
       if (this.video.playbackRate !== 1.0) {
         this.video.playbackRate = 1.0;
-        this.callbacks.onLog('[Sync] In sync (<100ms drift). Playback rate reset to 1.00x.');
+        this.lastRateChangeTime = now;
+        this.callbacks.onLog('[Sync] In sync (difference <=2.0s). Rate maintained at steady 1.00x.');
       }
       return;
     }
 
-    // Rule 2: 100ms <= Drift <= 1200ms: Soft rate nudge (0.97x - 1.03x)
-    if (absDriftMs <= 1200) {
-      if (driftMs > 0) {
-        // Local is ahead: slow down softly
-        if (this.video.playbackRate !== 0.97) {
-          this.video.playbackRate = 0.97;
-          this.callbacks.onLog(`[Sync] Soft nudge: Ahead by +${driftMs}ms. Rate adjusted to 0.97x.`);
-        }
-      } else {
-        // Local is behind: speed up softly
-        if (this.video.playbackRate !== 1.03) {
-          this.video.playbackRate = 1.03;
-          this.callbacks.onLog(`[Sync] Soft nudge: Behind by ${driftMs}ms. Rate adjusted to 1.03x.`);
+    // Rule 2: 2000ms < Drift <= 3500ms: Gentle settle zone (0.98x - 1.02x)
+    // Rate changes are smoothed: once applied, rate is held for at least 3 seconds.
+    if (absDriftMs <= 3500) {
+      if (now - this.lastRateChangeTime >= 3000) {
+        const nudgeRate = driftMs > 0 ? 0.98 : 1.02;
+        if (this.video.playbackRate !== nudgeRate) {
+          this.video.playbackRate = nudgeRate;
+          this.lastRateChangeTime = now;
+          this.callbacks.onLog(`[Sync] Gentle settle: drift ${driftMs > 0 ? '+' : ''}${driftMs}ms. Rate adjusted to ${nudgeRate}x.`);
         }
       }
       return;
     }
 
-    // Rule 3: Drift > 1200ms: Hard seek
-    this.callbacks.onLog(`[Sync] Hard seek: Drift ${driftMs > 0 ? '+' : ''}${driftMs}ms exceeded threshold (>1200ms). Seeking to ${this.formatTime(targetLocalTime)}.`);
+    // Rule 3: Drift > 3500ms: Single clean catchup seek
+    this.callbacks.onLog(`[Sync] Catchup seek: Drift ${driftMs > 0 ? '+' : ''}${driftMs}ms exceeded 3.5s. Seeking to ${this.formatTime(targetLocalTime)}.`);
+    this.markProgrammaticSeek();
     this.isApplyingRemoteUpdate = true;
     try {
       this.video.currentTime = Math.max(0, targetLocalTime);
       this.video.playbackRate = 1.0;
+      this.lastRateChangeTime = now;
+      this.callbacks.onRemoteScrub?.(targetLocalTime, false);
     } finally {
       setTimeout(() => {
         this.isApplyingRemoteUpdate = false;
@@ -715,6 +767,26 @@ export class SyncEngine {
     this.callbacks.onPauseWithDetails('You', this.video.currentTime);
   }
 
+  public requestSeek(targetTime: number): void {
+    if (!this.video) return;
+    this.markProgrammaticSeek();
+    this.video.currentTime = Math.max(0, targetTime);
+    this.broadcastEvent('SEEK');
+    this.callbacks.onAnnounceMessage(`Seeked to ${this.formatTime(targetTime)}`);
+  }
+
+  public requestScrub(targetTime: number, isScrubbing: boolean): void {
+    if (!this.video) return;
+    if (!isScrubbing) {
+      this.markProgrammaticSeek();
+      this.video.currentTime = Math.max(0, targetTime);
+      this.broadcastEvent('SEEK');
+      this.callbacks.onAnnounceMessage(`Seeked to ${this.formatTime(targetTime)}`);
+    } else {
+      this.broadcastEvent('SCRUB', undefined, undefined, { isScrubbing: true, scrubTargetTime: targetTime });
+    }
+  }
+
   public sendChatMessage(text: string): void {
     const chatMessage: ChatMessagePayload = {
       id: Math.random().toString(36).substring(2, 10),
@@ -729,6 +801,7 @@ export class SyncEngine {
   public destroy(): void {
     if (this.pingIntervalTimer) clearInterval(this.pingIntervalTimer);
     if (this.driftCheckTimer) clearInterval(this.driftCheckTimer);
+    if (this.programmaticSeekTimer !== null) clearTimeout(this.programmaticSeekTimer);
     this.detachVideo();
     this.pendingPings.clear();
   }

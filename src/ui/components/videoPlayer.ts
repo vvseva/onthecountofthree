@@ -15,6 +15,7 @@ export interface VideoPlayerCallbacks {
   onUserPlayRequest: (instant: boolean) => void;
   onUserPauseRequest: () => void;
   onUserSeek: (targetTime: number) => void;
+  onUserScrub?: (targetTime: number, isScrubbing: boolean) => void;
   onLog: (msg: string, level?: 'info' | 'warn' | 'error') => void;
   onAnnounce: (msg: string) => void;
   onAudioDecoded?: (trackName: string) => void;
@@ -542,12 +543,27 @@ export class VideoPlayerComponent {
       }
     });
 
+    this.video.addEventListener('seeked', () => {
+      if (!this.isUserScrubbing && this.video.duration) {
+        const pct = (this.video.currentTime / this.video.duration) * 100;
+        this.scrubber.value = pct.toString();
+        this.fsProgressFill.style.width = `${pct}%`;
+        this.updateTimeDisplay(this.video.currentTime, this.video.duration);
+      }
+    });
+
+    let lastScrubBroadcast = 0;
     this.scrubber.addEventListener('input', () => {
       this.isUserScrubbing = true;
       if (this.video.duration) {
         const target = (parseFloat(this.scrubber.value) / 100) * this.video.duration;
         this.fsProgressFill.style.width = `${this.scrubber.value}%`;
         this.updateTimeDisplay(target, this.video.duration);
+        const now = Date.now();
+        if (now - lastScrubBroadcast > 80) {
+          lastScrubBroadcast = now;
+          this.callbacks.onUserScrub?.(target, true);
+        }
       }
     });
 
@@ -556,6 +572,7 @@ export class VideoPlayerComponent {
       if (this.video.duration) {
         const target = (parseFloat(this.scrubber.value) / 100) * this.video.duration;
         this.video.currentTime = target;
+        this.callbacks.onUserScrub?.(target, false);
         this.callbacks.onUserSeek(target);
       }
     });
@@ -1119,7 +1136,17 @@ export class VideoPlayerComponent {
     const target = Math.max(0, Math.min(this.video.duration, this.video.currentTime + seconds));
     this.video.currentTime = target;
     this.callbacks.onUserSeek(target);
+    this.callbacks.onUserScrub?.(target, false);
     this.callbacks.onAnnounce(`Seek ${seconds > 0 ? '+' : ''}${seconds} seconds`);
+  }
+
+  public updateScrubberPosition(targetTimeSec: number, isScrubbing = false): void {
+    if (!this.video.duration || (this.isUserScrubbing && !isScrubbing)) return;
+    const clamped = Math.max(0, Math.min(this.video.duration, targetTimeSec));
+    const pct = (clamped / this.video.duration) * 100;
+    this.scrubber.value = pct.toString();
+    this.fsProgressFill.style.width = `${pct}%`;
+    this.updateTimeDisplay(clamped, this.video.duration);
   }
 
   public adjustVolume(delta: number): void {

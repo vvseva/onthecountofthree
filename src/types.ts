@@ -4,6 +4,7 @@ export type SyncEventType =
   | 'PLAY'
   | 'PAUSE'
   | 'SEEK'
+  | 'SCRUB'
   | 'PING'
   | 'PONG'
   | 'ANNOUNCE'
@@ -38,6 +39,7 @@ export interface SyncPayload {
   pausedBy?: string;          // Identifier of user who initiated pause
   role?: SyncRole;            // Sync role: PRIMARY (master clock) or SECONDARY (follower)
   audioDecodedTrack?: string; // Notification of completed audio decode
+  isScrubbing?: boolean;      // True if user is actively dragging the timeline scrubber
 }
 
 export type RelayConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR';

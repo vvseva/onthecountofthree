@@ -141,28 +141,33 @@ test('Fuzzy Fingerprint calculation: 4MB head + 1MB tail + duration buffer', asy
   assert.match(formattedCode, /^[0-9A-F]{4}-[0-9A-F]{4}$/);
 });
 
-test('Drift Compensation Rules Verification', () => {
+test('Drift Compensation Rules Verification: Minor differences (<=2s) maintain 1.00x steady rate without flutter', () => {
   function getDriftAction(driftMs) {
     const abs = Math.abs(driftMs);
-    if (abs < 100) return { action: 'DO_NOTHING', rate: 1.0 };
-    if (abs <= 1200) {
-      if (driftMs > 0) return { action: 'NUDGE_SLOW', rate: 0.97 };
-      return { action: 'NUDGE_FAST', rate: 1.03 };
+    // Differences up to 2 seconds do NOT alter playback speed
+    if (abs <= 2000) return { action: 'DO_NOTHING', rate: 1.0 };
+    // Settle zone between 2000ms and 3500ms
+    if (abs <= 3500) {
+      if (driftMs > 0) return { action: 'NUDGE_SLOW', rate: 0.98 };
+      return { action: 'NUDGE_FAST', rate: 1.02 };
     }
+    // Divergence > 3500ms
     return { action: 'HARD_SEEK', rate: 1.0 };
   }
 
-  // < 100ms threshold
+  // Differences <= 2000ms (a few seconds): rock solid 1.00x, no flutter!
   assert.deepEqual(getDriftAction(50), { action: 'DO_NOTHING', rate: 1.0 });
-  assert.deepEqual(getDriftAction(-80), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(getDriftAction(-500), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(getDriftAction(1500), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(getDriftAction(-2000), { action: 'DO_NOTHING', rate: 1.0 });
 
-  // 100ms - 1200ms soft nudge
-  assert.deepEqual(getDriftAction(350), { action: 'NUDGE_SLOW', rate: 0.97 });
-  assert.deepEqual(getDriftAction(-500), { action: 'NUDGE_FAST', rate: 1.03 });
+  // 2000ms - 3500ms gentle settle
+  assert.deepEqual(getDriftAction(2500), { action: 'NUDGE_SLOW', rate: 0.98 });
+  assert.deepEqual(getDriftAction(-3000), { action: 'NUDGE_FAST', rate: 1.02 });
 
-  // > 1200ms hard seek
-  assert.deepEqual(getDriftAction(1500), { action: 'HARD_SEEK', rate: 1.0 });
-  assert.deepEqual(getDriftAction(-2000), { action: 'HARD_SEEK', rate: 1.0 });
+  // > 3500ms hard seek
+  assert.deepEqual(getDriftAction(4000), { action: 'HARD_SEEK', rate: 1.0 });
+  assert.deepEqual(getDriftAction(-5000), { action: 'HARD_SEEK', rate: 1.0 });
 });
 
 test('Peer Handshake & Wire Simulation: Peer A and Peer B exchange encrypted messages', async () => {
@@ -686,15 +691,12 @@ test('Primary vs Secondary Sync Roles: Primary maintains 1.00x fixed clock with 
     }
     const abs = Math.abs(driftMs);
     if (isWarmup) {
-      if (abs < 100) return { action: 'DO_NOTHING', rate: 1.0 };
-      if (abs <= 3500) {
-        return { action: 'WARMUP_SETTLE', rate: driftMs > 0 ? 0.98 : 1.02 };
-      }
+      if (abs <= 3500) return { action: 'DO_NOTHING', rate: 1.0 };
       return { action: 'HARD_SEEK', rate: 1.0 };
     }
-    if (abs < 100) return { action: 'DO_NOTHING', rate: 1.0 };
-    if (abs <= 1200) {
-      return { action: driftMs > 0 ? 'NUDGE_SLOW' : 'NUDGE_FAST', rate: driftMs > 0 ? 0.97 : 1.03 };
+    if (abs <= 2000) return { action: 'DO_NOTHING', rate: 1.0 };
+    if (abs <= 3500) {
+      return { action: driftMs > 0 ? 'NUDGE_SLOW' : 'NUDGE_FAST', rate: driftMs > 0 ? 0.98 : 1.02 };
     }
     return { action: 'HARD_SEEK', rate: 1.0 };
   }
@@ -704,14 +706,17 @@ test('Primary vs Secondary Sync Roles: Primary maintains 1.00x fixed clock with 
   assert.deepEqual(computeAction('PRIMARY', 1500), { action: 'DO_NOTHING', rate: 1.0 });
   assert.deepEqual(computeAction('PRIMARY', -800), { action: 'DO_NOTHING', rate: 1.0 });
 
-  // Secondary during warmup: suppresses hard seek for 1500ms drift, gently settles
-  assert.deepEqual(computeAction('SECONDARY', 1500, true), { action: 'WARMUP_SETTLE', rate: 0.98 });
-  assert.deepEqual(computeAction('SECONDARY', -500, true), { action: 'WARMUP_SETTLE', rate: 1.02 });
-  assert.deepEqual(computeAction('SECONDARY', 4000, true), { action: 'HARD_SEEK', rate: 1.0 });
+  // Secondary during warmup: suppresses hard seek for 1500ms drift, plays steady
+  assert.deepEqual(computeAction('SECONDARY', 1500, true), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('SECONDARY', -500, true), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('SECONDARY', 4500, true), { action: 'HARD_SEEK', rate: 1.0 });
 
-  // Secondary after warmup: standard rules apply
-  assert.deepEqual(computeAction('SECONDARY', 300, false), { action: 'NUDGE_SLOW', rate: 0.97 });
-  assert.deepEqual(computeAction('SECONDARY', 1500, false), { action: 'HARD_SEEK', rate: 1.0 });
+  // Secondary after warmup: differences <= 2.0s do not flutter rate
+  assert.deepEqual(computeAction('SECONDARY', 300, false), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('SECONDARY', 1500, false), { action: 'DO_NOTHING', rate: 1.0 });
+  assert.deepEqual(computeAction('SECONDARY', 2500, false), { action: 'NUDGE_SLOW', rate: 0.98 });
+  assert.deepEqual(computeAction('SECONDARY', -3000, false), { action: 'NUDGE_FAST', rate: 1.02 });
+  assert.deepEqual(computeAction('SECONDARY', 4000, false), { action: 'HARD_SEEK', rate: 1.0 });
 });
 
 test('English Track Prioritization: Automatically selects English audio and subtitle tracks', () => {
@@ -772,30 +777,78 @@ test('Audio Decoded Peer Notification: broadcasts AUDIO_DECODED event with track
   assert.equal(decrypted.role, 'PRIMARY');
 });
 
-test('Role Handshake: Second user that joins is Clock (PRIMARY) and first user is Follower (SECONDARY)', () => {
-  // User 1 creates room -> isHost = true
-  let user1 = { isHost: true, role: 'SECONDARY' };
-  // User 2 joins via share URL -> isHost = false
-  let user2 = { isHost: false, role: 'PRIMARY' };
+test('Role Handshake: Room host is Master Clock (PRIMARY) and joining peer is Follower (SECONDARY)', () => {
+  // User 1 creates room -> isHost = true, role = 'PRIMARY'
+  let user1 = { isHost: true, role: 'PRIMARY' };
+  // User 2 joins via share URL -> isHost = false, role = 'SECONDARY'
+  let user2 = { isHost: false, role: 'SECONDARY' };
 
   function onPeerConnected(user, remoteRole) {
-    if (user.isHost) {
-      user.role = 'SECONDARY'; // First user becomes follower
-    } else {
-      user.role = 'PRIMARY'; // Second user that joins is clock
+    // If both advertise PRIMARY, non-host yields to SECONDARY
+    if (!user.isHost && user.role === 'PRIMARY' && remoteRole === 'PRIMARY') {
+      user.role = 'SECONDARY';
     }
   }
 
   // Initial state before peer joins
-  assert.equal(user1.role, 'SECONDARY');
-  assert.equal(user2.role, 'PRIMARY');
+  assert.equal(user1.role, 'PRIMARY');
+  assert.equal(user2.role, 'SECONDARY');
 
   // Peer connection event
   onPeerConnected(user1, user2.role);
   onPeerConnected(user2, user1.role);
 
-  assert.equal(user1.role, 'SECONDARY', 'First user (host) must be Follower (SECONDARY)');
-  assert.equal(user2.role, 'PRIMARY', 'Second user that joins must be Clock (PRIMARY)');
+  assert.equal(user1.role, 'PRIMARY', 'First user (host) must be Master Clock (PRIMARY)');
+  assert.equal(user2.role, 'SECONDARY', 'Second user that joins must be Follower (SECONDARY)');
+});
+
+test('Timeline Scrubbing Synchronization: SCRUB and SEEK payloads correctly exchange scrub position', async () => {
+  const room = await generateRoomCredentials();
+
+  const scrubPayload = {
+    version: 1,
+    senderId: 'PEER_SCRUBBER',
+    sequenceId: 10,
+    timestamp: Date.now(),
+    type: 'SCRUB',
+    playbackTime: 145.2,
+    playbackRate: 1.0,
+    paused: true,
+    role: 'PRIMARY',
+    isScrubbing: true
+  };
+
+  const encrypted = await encryptPayload(scrubPayload, room.aesKey);
+  const decrypted = await decryptPayload(encrypted, room.aesKey);
+
+  assert.ok(decrypted);
+  assert.equal(decrypted.type, 'SCRUB');
+  assert.equal(decrypted.playbackTime, 145.2);
+  assert.equal(decrypted.isScrubbing, true);
+});
+
+test('Programmatic Seek Guard: suppresses broadcast when seek was triggered remotely or by drift engine', () => {
+  let broadcastCount = 0;
+  let isProgrammaticSeek = false;
+  let isApplyingRemoteUpdate = false;
+
+  function onVideoSeeked() {
+    if (isProgrammaticSeek || isApplyingRemoteUpdate) {
+      isProgrammaticSeek = false;
+      return; // Suppressed!
+    }
+    broadcastCount++;
+  }
+
+  // 1. Remote update or drift seek triggers native video 'seeked' event
+  isProgrammaticSeek = true;
+  onVideoSeeked();
+  assert.equal(broadcastCount, 0, 'Programmatic seek must NOT broadcast SEEK back to peer');
+  assert.equal(isProgrammaticSeek, false);
+
+  // 2. User manual seek triggers native video 'seeked' event
+  onVideoSeeked();
+  assert.equal(broadcastCount, 1, 'User seek must broadcast SEEK to peer');
 });
 
 test('Playback Prevention: Warning shown when pressing Play without a loaded video', () => {

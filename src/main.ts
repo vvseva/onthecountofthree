@@ -115,7 +115,7 @@ async function bootstrapApp() {
       syncEngine.setIsHost(true);
       syncEngine.setRoomCredentials(credentials.aesKey, credentials.hashedRoomTag);
       badgesBar.updateRole(syncEngine.getRole());
-      announcer.announce('Created new encrypted room. You are Follower; second user that joins will be Master Clock.');
+      announcer.announce('Created new encrypted room. You are Master Clock; joining peer will be Follower.');
       diagnostics.appendLog(`[Room] Generated fresh Room ID ${credentials.roomId}`);
     },
     onOpenInfoModal: () => {
@@ -167,7 +167,7 @@ async function bootstrapApp() {
       if (peer && !previousPeer) {
         const roleMsg = syncEngine.getRole() === 'PRIMARY'
           ? 'You are Master Clock (zero rate changes). Peer is Follower.'
-          : 'Second user joined as Master Clock. You are Follower.';
+          : 'You are Follower. Peer is Master Clock.';
         toastManager.show({
           title: 'Peer Connected',
           message: `User <strong>${peer.peerId}</strong> joined the room.<br><small>${roleMsg}</small>`,
@@ -266,6 +266,9 @@ async function bootstrapApp() {
         durationMs: 5000
       });
       announcer.announce(`Peer finished decoding audio: ${trackName}`);
+    },
+    onRemoteScrub: (targetTimeSec, isScrubbing) => {
+      videoPlayer.updateScrubberPosition(targetTimeSec, isScrubbing);
     }
   });
 
@@ -302,7 +305,11 @@ async function bootstrapApp() {
       syncEngine.requestPause();
     },
     onUserSeek: (targetTime) => {
+      syncEngine.requestSeek(targetTime);
       diagnostics.appendLog(`[Video] Scrubbed timeline to ${targetTime.toFixed(2)}s`);
+    },
+    onUserScrub: (targetTime, isScrubbing) => {
+      syncEngine.requestScrub(targetTime, isScrubbing);
     },
     onLog: (msg, level) => {
       diagnostics.appendLog(msg, level);
